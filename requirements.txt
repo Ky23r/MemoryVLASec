@@ -14,3 +14,11 @@ tensorflow
 tensorflow_datasets
 tensorflow_graphics
 dlimp @ git+https://github.com/moojink/dlimp_openvla
+Pillow
+absl-py
+bitsandbytes
+packaging
+requests
+rich
+tokenizers
+torchvision
