@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE and Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project-specific ignores
+logs/
+*.log
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
+datasets/
+data/
+
+# Temporary and OS files
+tmp/
+temp/
+.DS_Store
+Thumbs.db
+
+# Other machine-specific or auto-generated files
+build/
+dist/
+*.egg-info/

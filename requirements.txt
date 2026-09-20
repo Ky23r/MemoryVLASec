@@ -1,0 +1,16 @@
+torch>=2.0.0
+numpy>=1.21.0
+draccus
+timm
+transformers
+huggingface_hub
+einops
+accelerate
+peft
+sentencepiece
+tqdm
+datasets
+tensorflow
+tensorflow_datasets
+tensorflow_graphics
+dlimp @ git+https://github.com/moojink/dlimp_openvla
