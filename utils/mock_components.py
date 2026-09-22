@@ -1,11 +1,22 @@
 import torch
 import torch.nn as nn
+import numpy as np
+from PIL import Image
 from torch.utils.data import Dataset
+
+
+class MockMemoryBank:
+    def __init__(self):
+        self.dataloader_type = "group"
+        self.reset()
+
+    def reset(self):
+        self.bank = {}
 
 class MockVisionBackbone(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(3, 256) # So LoRA/BNB has something to hook into
+        self.fc1 = nn.Linear(3, 256)
         
     def forward(self, pixel_values):
         B = pixel_values.shape[0]
@@ -24,11 +35,9 @@ class MockNet(nn.Module):
 class MockActionModel(nn.Module):
     def __init__(self):
         super().__init__()
+        self.in_channels = 7
         self.net = MockNet()
         
-    def predict_action(self, *args, **kwargs):
-        return torch.zeros(7) # Dummy action
-
 class MockVLM(nn.Module):
     def __init__(self):
         super().__init__()
@@ -38,8 +47,26 @@ class MockVLM(nn.Module):
 class MockModel(nn.Module):
     def __init__(self):
         super().__init__()
+        self.future_action_window_size = 15
+        self.dataloader_type = "group"
+        self.group_size = 16
+        self.cur_timestep = 0
         self.vlm = MockVLM()
         self.action_model = MockActionModel()
+        self.cog_mem_bank = MockMemoryBank()
+        self.per_mem_bank = MockMemoryBank()
+
+    def predict_action(self, image, instruction, episode_first_frame="False", **kwargs):
+        if not isinstance(image, Image.Image):
+            raise TypeError("Mock predict_action expects a PIL image like upstream MemoryVLA")
+        if episode_first_frame == "True":
+            self.cog_mem_bank.reset()
+            self.per_mem_bank.reset()
+            self.cur_timestep = 0
+        shape = (self.future_action_window_size + 1, self.action_model.in_channels)
+        actions = np.zeros(shape, dtype=np.float32)
+        self.cur_timestep += 1
+        return actions.copy(), actions
 
 class MockBaseMemoryVLA(nn.Module):
     """A lightweight mock of the BaseMemoryVLA for dry-run testing."""
@@ -47,20 +74,41 @@ class MockBaseMemoryVLA(nn.Module):
         super().__init__()
         self.model = MockModel()
         
-    def forward(self, pixel_values, input_ids, attention_mask, actions, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        pixel_values=None,
+        labels=None,
+        actions=None,
+        action_masks=None,
+        timesteps=None,
+        episode_ids=None,
+        inputs_embeds=None,
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        repeated_diffusion_steps=4,
+    ):
         # Dummy loss for training tests
+        assert labels is not None
+        assert output_hidden_states is True
+        assert actions.ndim == 3 and actions.shape[1:] == (16, 7)
+        assert episode_ids is not None and timesteps is not None
         loss = self.model.vlm.vision_backbone.fc1(pixel_values.mean(dim=[2,3])).sum()
         loss += self.model.action_model.net.fc1(torch.randn(pixel_values.shape[0], 256, device=pixel_values.device)).sum()
         return loss, {}
         
-    def predict_action(self, pixel_values, input_ids, **kwargs):
-        return self.model.action_model.predict_action()
-
-
 class MockDataset(Dataset):
     """A lightweight mock dataset for dry-run testing."""
     def __init__(self, length=8):
         self.length = length
+        self.transitions = [
+            {"episode_ids": np.asarray([index // 4], dtype=np.int64)}
+            for index in range(length)
+        ]
         
     def __len__(self):
         return self.length
@@ -69,9 +117,22 @@ class MockDataset(Dataset):
         if idx >= self.length:
             raise IndexError("Index out of bounds")
         return {
+            "image": Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)),
             "pixel_values": torch.randn(3, 224, 224),
             "instruction": "mock instruction",
             "input_ids": torch.zeros(32, dtype=torch.long),
             "attention_mask": torch.ones(32, dtype=torch.long),
-            "actions": torch.zeros(7, dtype=torch.float32)
+            "labels": torch.zeros(32, dtype=torch.long),
+            "actions": torch.zeros(16, 7, dtype=torch.float32),
+            "action_masks": torch.ones(16, dtype=torch.bool),
+            "episode_ids": torch.tensor(idx // 4, dtype=torch.long),
+            "timesteps": torch.tensor(idx % 4, dtype=torch.long),
         }
+
+
+def collate_mock_samples(samples):
+    result = {}
+    for key in samples[0]:
+        values = [sample[key] for sample in samples]
+        result[key] = values if key in {"image", "instruction"} else torch.stack(values)
+    return result

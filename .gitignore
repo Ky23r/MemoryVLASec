@@ -23,8 +23,8 @@ checkpoints/
 *.pth
 *.ckpt
 *.bin
-datasets/
-data/
+/datasets/
+/data/
 
 # Temporary and OS files
 tmp/

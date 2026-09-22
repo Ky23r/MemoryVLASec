@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memoryvlasec"
+version = "0.1.0"
+description = "Security evaluation framework for MemoryVLA attacks and defenses"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+security = [
+    "peft==0.11.1",
+    "bitsandbytes==0.43.1",
+]
+
+[project.scripts]
+memoryvlasec = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+where = [".", "models/core"]
+include = [
+    "action_model*",
+    "attacks*",
+    "defenses*",
+    "models",
+    "prismatic*",
+    "utils*",
+    "vla*",
+]
+exclude = ["tests*"]

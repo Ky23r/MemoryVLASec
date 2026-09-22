@@ -7,17 +7,26 @@ A standalone, execution-focused framework for evaluating backdoor attacks (`BadV
 ```bash
 git clone <repository_url>
 cd MemoryVLASec
-pip install -r requirements.txt
 pip install -e .
 ```
+
+The clean MemoryVLA baseline does not install PEFT or bitsandbytes. Optional
+security experiments that still require those packages use `pip install -e ".[security]"`.
+
+Python 3.10 is the upstream-tested version (Python 3.11 is also accepted by
+this package). The editable install reads the pinned dependencies from
+`requirements.txt` and installs `vla`, `prismatic`, and `action_model` as
+top-level packages, matching the upstream MemoryVLA layout.
+
 **Core Dependencies:** `torch`, `torchvision`, `transformers`, `huggingface_hub`, `timm`, `einops`, `tqdm`.
 
-## Dataset Setup (Hugging Face)
+## Dataset sources
 
-The framework is deeply integrated with the Hugging Face `datasets` library. 
-Simply provide a `--dataset_id` (and optional `--dataset_split` / `--dataset_config`), and the dataset will be **downloaded and cached automatically**. 
-*   **No manual downloading**: The pipeline automatically reads images, instructions, and target actions from the standard columns.
-*   Optional local testing: You can still use `--dataset_path` if you have a local folder with a `manifest.jsonl`, but HF dataset loading is the recommended primary workflow.
+Choose exactly one source. Use `--dataset_id shihao1895/libero-rlds`
+for a remote TFDS/RLDS snapshot, or `--dataset_path <path>` for a local
+TFDS root. Local `trajectories.jsonl` and `manifest.jsonl` adapters require
+`--dataset_format trajectory` and `--dataset_format flat`, respectively.
+`--cache_dir` controls the Hugging Face model and dataset cache.
 
 ## Pretrained Weights (Hugging Face)
 
@@ -29,12 +38,15 @@ This project natively integrates with Hugging Face (`huggingface_hub`). Pretrain
 
 All experiments are executed via `main.py`. For convenience, fully configured shell scripts are provided in `scripts/`.
 
-### 1. Standard MemoryVLA (Baseline Inference)
-Evaluates the clean, pretrained baseline architecture.
+### 1. Standard MemoryVLA (offline validation)
+Runs `predict_action()` over recorded chronological transitions and reports
+normalized action-chunk MSE. It does **not** run LIBERO and does not report a
+task success rate. `--evaluation_type libero` and `simplerenv` fail explicitly;
+use the upstream environment evaluators for real rollouts.
 ```bash
 bash scripts/baseline_eval.sh
 # or manually:
-python main.py --mode evaluate --model_id shihao1895/memvla-libero-spatial --dataset_id shihao1895/libero-rlds --dataset_split train --attack none --defense none
+python main.py --mode evaluate --model_id shihao1895/memvla-libero-spatial --dataset_id shihao1895/libero-rlds --dataset_format rlds --attack none --defense none --device cuda
 ```
 
 ### 2. MemoryVLA + BadVLA (Attack Fine-Tuning & Eval)
@@ -61,20 +73,23 @@ python main.py --mode evaluate --model_id shihao1895/memvla-libero-spatial --loa
 *   `--model_id` (Required for GPU): HF repository ID (e.g., `shihao1895/memvla-libero-spatial`).
 *   `--revision`: HF repository branch/commit (default: `main`).
 *   `--hf_token`: Hugging Face auth token for private access.
-*   `--dataset_id` (Required for GPU): HF Dataset ID to automatically download/cache (e.g., `shihao1895/libero-rlds`).
-*   `--dataset_split`: Dataset split to load (default: `train`).
+*   `--dataset_id`: Remote TFDS/RLDS repository; mutually exclusive with `--dataset_path`.
 *   `--dataset_config`: Optional dataset subset name.
 *   `--dataset_revision`: Optional dataset version.
-*   `--dataset_path`: Optional fallback to a local dataset folder.
+*   `--dataset_path`: Local dataset source; mutually exclusive with `--dataset_id`.
+*   `--cache_dir`: Optional Hugging Face cache directory.
+*   `--checkpoint`: Exact baseline state dict produced by this project; loaded strictly. This is weights-only loading, not optimizer/scheduler resume.
 *   `--output_dir`: Directory where fine-tuned checkpoints (`finetuned_memoryvla.pt`) are saved (default: `checkpoints`).
 *   `--load_local_checkpoint`: Path to a fine-tuned local `state_dict` to load on top of the base model (e.g., `./checkpoints/finetuned_memoryvla.pt`).
 
 ### Training / Hardware
 *   `--device`: Compute device (default: `cuda`).
-*   `--batch_size`: Real data processing batch size (default: `4`).
+*   `--batch_size`: Training batch size. By default, grouped loading uses one complete checkpoint-defined group and stream loading uses one transition.
 *   `--epochs`: Number of epochs for training (default: `1`).
 *   `--learning_rate`: Fine-tuning learning rate (default: `1e-5`).
 *   `--seed`: Random seed for reproducibility (default: `42`).
+*   `--dtype`: `float32` or `bfloat16` (defaults to FP32 for training/CPU and BF16 for CUDA inference).
+*   `--unnorm_key`: Checkpoint dataset-statistics key when a checkpoint contains more than one dataset.
 
 ### Attack (BadVLA)
 *   `--attack`: Set to `badvla` to enable the backdoor, or `none`.

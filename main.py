@@ -1,15 +1,11 @@
-import sys
-import os
-import torch
+import json
 from pathlib import Path
-from huggingface_hub import snapshot_download
+
+import torch
 
 from utils.args import parse_arguments
-from utils.train import run_train
 from utils.evaluate import run_evaluate
-from models.secure_vla import SecureVLA
-from attacks.badvla import BadVLA
-from defenses.amemguard import AMemGuard
+from utils.train import run_train
 
 
 def set_seed(seed):
@@ -18,126 +14,128 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def download_hf_checkpoint(model_id: str, revision: str, hf_token: str) -> str:
-    print(f"Resolving checkpoint for {model_id} (revision: {revision})...")
-    try:
-        # Download the repo into the HF cache
-        cached_repo_dir = snapshot_download(
-            repo_id=model_id,
-            revision=revision,
-            token=hf_token,
-            allow_patterns=[
-                "*.json",
-                "*.pt",
-                "checkpoints/*",
-            ],  # Only download what's needed
-            ignore_patterns=["*.md", ".git*"],
+def _validate_dataset_source(args):
+    if args.mock:
+        return
+    has_id = bool(args.dataset_id)
+    has_path = bool(args.dataset_path)
+    if has_id == has_path:
+        raise ValueError("Provide exactly one of --dataset_id or --dataset_path")
+    if args.dataset_format in {"trajectory", "flat"} and not has_path:
+        raise ValueError(f"--dataset_format {args.dataset_format} requires --dataset_path")
+    if has_path and not Path(args.dataset_path).is_dir():
+        raise FileNotFoundError(f"Dataset path is not a directory: {args.dataset_path}")
+
+
+def _resolve_device(device_name):
+    device = torch.device(device_name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
+    return device
+
+
+def _load_state_checkpoint(model, checkpoint_path, device="cpu"):
+    path = Path(checkpoint_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"State checkpoint not found: {path}")
+    state_dict = torch.load(path, map_location=device, weights_only=True)
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise TypeError(f"Checkpoint must be a non-empty state_dict mapping: {path}")
+    model.load_state_dict(state_dict, strict=True)
+    statistics_path = path.parent / "dataset_statistics.json"
+    if statistics_path.is_file():
+        from utils.dataset import _find_memory_vla
+
+        with statistics_path.open("r", encoding="utf-8") as handle:
+            statistics = json.load(handle)
+        if not isinstance(statistics, dict) or not statistics:
+            raise TypeError(f"Invalid dataset statistics mapping: {statistics_path}")
+        _find_memory_vla(model).norm_stats = statistics
+
+
+def _build_model(args, device):
+    if args.mock:
+        print("\n[MOCK MODE] Using lightweight infrastructure-only components.")
+        from utils.mock_components import MockBaseMemoryVLA
+
+        base_model = MockBaseMemoryVLA()
+    else:
+        print(f"Initializing upstream MemoryVLA from {args.model_id} on {device}...")
+        from models.base_memory_vla import BaseMemoryVLA
+
+        dtype_name = args.dtype or (
+            "bfloat16" if args.mode == "evaluate" and device.type == "cuda" else "float32"
+        )
+        if dtype_name == "bfloat16" and device.type != "cuda":
+            raise ValueError("MemoryVLA bfloat16 predict_action requires CUDA; use --dtype float32 on CPU")
+        base_model = BaseMemoryVLA(
+            model_id_or_path=args.model_id,
+            revision=args.revision,
+            hf_token=args.hf_token,
+            cache_dir=args.cache_dir,
+            load_for_training=args.mode == "train",
+            dtype=dtype_name,
         )
 
-        # Locate the .pt checkpoint file inside the cached directory
-        # The structure is expected to be repo_dir/checkpoints/<ckpt>.pt
-        checkpoint_dir = Path(cached_repo_dir) / "checkpoints"
-        if not checkpoint_dir.exists():
-            raise FileNotFoundError(
-                f"Expected 'checkpoints' folder in the downloaded model {model_id}."
-            )
+    security_mode = args.attack != "none" or args.defense != "none"
+    if not security_mode:
+        model = base_model
+    else:
+        # Optional security experiments remain isolated from the clean baseline.
+        from models.secure_vla import SecureVLA
 
-        pt_files = list(checkpoint_dir.glob("*.pt"))
-        if not pt_files:
-            raise FileNotFoundError(f"No .pt files found in {checkpoint_dir}.")
+        attack = None
+        if args.attack == "badvla":
+            from attacks.badvla import BadVLA
 
-        # If there are multiple, usually 'latest-checkpoint.pt' or the last one is used
-        target_ckpt = pt_files[-1]
-        print(f"Successfully located cached checkpoint: {target_ckpt}")
-        return str(target_ckpt)
+            attack = BadVLA(trigger_size=args.trigger_size)
+        defense = None
+        if args.defense == "amemguard":
+            from defenses.amemguard import AMemGuard
 
-    except Exception as e:
-        print(f"\n[Error] Failed to load the model from Hugging Face: {model_id}")
-        print(f"Details: {str(e)}")
-        print(
-            "Please ensure the model ID is correct, the revision exists, and you have network access/authentication if it is a private repository."
-        )
-        sys.exit(1)
+            defense = AMemGuard(divergence_threshold=args.divergence_threshold)
+        if args.quantization != "none" or args.use_lora:
+            from utils.quantize import apply_lora, quantize_model
+
+            if args.quantization != "none":
+                base_model = quantize_model(base_model, quantization=args.quantization)
+            if args.use_lora or (args.mode == "train" and args.quantization != "none"):
+                base_model = apply_lora(base_model)
+        model = SecureVLA(base_model=base_model, attack=attack, defense=defense)
+
+    checkpoint = args.checkpoint
+    if security_mode and not checkpoint:
+        checkpoint = args.load_local_checkpoint
+    if checkpoint:
+        print(f"Loading exact project state_dict from {checkpoint}...")
+        _load_state_checkpoint(model, checkpoint)
+    return model.to(device)
 
 
-def main():
-    args = parse_arguments()
+def main(argv=None):
+    args = parse_arguments(argv)
     set_seed(args.seed)
 
     if args.mode == "verify":
-        # Offload lightweight CPU tests entirely to the tests directory
-        print("Running lightweight CPU tests from tests/test_verify.py...")
+        print("Running baseline lightweight verification tests...")
         from tests.test_verify import run_cpu_tests
 
         run_cpu_tests(args)
         return
 
-    if args.mock:
-        print("\n[MOCK MODE] Intercepting model and dataset with lightweight mocks for dry-run...")
-        from utils.mock_components import MockBaseMemoryVLA
-        base_model = MockBaseMemoryVLA()
-    else:
-        # Real experimental pipeline requires checkpoints and datasets
-        if not args.dataset_id and not args.dataset_path:
-            print(f"\n[Error] Missing dataset source.")
-            print("A real dataset is required for 'train' and 'evaluate' modes.")
-            print(
-                "Please provide a Hugging Face dataset ID via --dataset_id <id> (recommended) or a local path via --dataset_path <path>"
-            )
-            sys.exit(1)
-
-        # 1. Handle Hugging Face checkpoint downloading/caching natively
-        local_checkpoint_path = download_hf_checkpoint(
-            args.model_id, args.revision, args.hf_token
+    _validate_dataset_source(args)
+    device = _resolve_device(args.device)
+    if args.mode == "evaluate" and args.evaluation_type != "offline":
+        raise RuntimeError(
+            f"{args.evaluation_type} rollout evaluation is not implemented in this repository; "
+            "install and run the corresponding upstream environment evaluator instead"
         )
+    model = _build_model(args, device)
 
-        print(f"Initializing Real MemoryVLA on {args.device}...")
-        from models.base_memory_vla import BaseMemoryVLA
-
-        load_for_training = args.mode == "train"
-
-        # 2. Base Model Initialization (Clean Pretrained Weights)
-        base_model = BaseMemoryVLA(
-            checkpoint_path=local_checkpoint_path, load_for_training=load_for_training
-        )
-
-    # Import dynamic quantization utility
-    from utils.quantize import quantize_model, apply_lora
-
-    # Apply quantization on CPU BEFORE moving to device
-    if args.quantization != "none":
-        base_model = quantize_model(base_model, quantization=args.quantization)
-
-    # If training with quantization, or evaluating a LoRA model, apply LoRA
-    if args.use_lora or (args.mode == "train" and args.quantization != "none"):
-        base_model = apply_lora(base_model)
-
-    # 3. Setup Experimental Configuration (Attack / Defense)
-    attack = None
-    if args.attack == "badvla":
-        attack = BadVLA(trigger_size=args.trigger_size)
-
-    defense = None
-    if args.defense == "amemguard":
-        defense = AMemGuard(divergence_threshold=args.divergence_threshold)
-
-    # 4. Integrate wrappers
-    secure_model = SecureVLA(base_model=base_model, attack=attack, defense=defense)
-    secure_model.to(args.device)
-    
-    if args.load_local_checkpoint and os.path.exists(args.load_local_checkpoint):
-        print(f"Loading fine-tuned local state_dict from {args.load_local_checkpoint}...")
-        secure_model.load_state_dict(torch.load(args.load_local_checkpoint, map_location=args.device), strict=False)
-        
-    # 5. Execution Pipeline
     if args.mode == "train":
-        # Train ALWAYS starts from the cleanly loaded pretrained weights!
-        run_train(secure_model, args)
+        run_train(model, args)
     elif args.mode == "evaluate":
-        run_evaluate(secure_model, args)
-    else:
-        print(f"Unknown mode: {args.mode}")
-        sys.exit(1)
+        run_evaluate(model, args)
 
 
 if __name__ == "__main__":

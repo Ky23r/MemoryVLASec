@@ -20,7 +20,6 @@ echo "=========================================================="
 python main.py \
     --mode evaluate \
     --mock \
-    --quantization none \
     --attack none \
     --defense none \
     --device "${DEVICE}" \

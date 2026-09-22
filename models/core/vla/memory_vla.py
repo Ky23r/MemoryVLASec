@@ -623,17 +623,10 @@ class MemoryVLA(nn.Module):
         )
 
         # Load from Checkpoint (Custom --> should load both *projector* and *llm* weights)
-        if use_bf16:
-            raw_state = torch.load(pretrained_checkpoint, map_location="cpu")["model"]
-            for k in raw_state:
-                for subk in raw_state[k]:
-                    raw_state[k][subk] = raw_state[k][subk].to(torch.bfloat16)
-
-            model_state_dict = raw_state
-        else:
-            model_state_dict = torch.load(
-                pretrained_checkpoint, map_location="cuda"
-            )["model"]
+        checkpoint = torch.load(pretrained_checkpoint, map_location="cpu", weights_only=True)
+        if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("model"), dict):
+            raise TypeError("Upstream MemoryVLA checkpoint must contain a 'model' component mapping")
+        model_state_dict = checkpoint["model"]
 
         assert (
             "projector" in model_state_dict and "llm_backbone" in model_state_dict
@@ -662,20 +655,22 @@ class MemoryVLA(nn.Module):
 
         # Load ActionModel from Checkpoint
         if "action_model" in model_state_dict:
-            memory_vla.action_model.load_state_dict(model_state_dict["action_model"], strict=False)
+            memory_vla.action_model.load_state_dict(model_state_dict["action_model"], strict=True)
             assert use_ema is False, "Does not support using EMA weights from pretrained checkpoint."
             if "ema_diffusion" in model_state_dict and use_ema:
                 memory_vla.ema_diffusion.load_state_dict(model_state_dict["ema_diffusion"])
             elif use_ema:
                 memory_vla.ema_diffusion.load_state_dict(model_state_dict["action_model"])
         else:
-            overwatch.warning("No ActionModel found in the pretrained checkpoint. Initializing a new one.")
+            raise KeyError("MemoryVLA checkpoint is missing required 'action_model' weights")
 
         # load other weights
         for key, sub_state in model_state_dict.items():
             if key not in {"projector", "llm_backbone", "vision_backbone",
                            "action_model", "ema_diffusion"}:
                 module = getattr(memory_vla, key, None)
+                if module is None:
+                    raise KeyError(f"Checkpoint contains unknown MemoryVLA component: {key}")
                 module.load_state_dict(sub_state, strict=True)
 
         del model_state_dict
@@ -684,7 +679,7 @@ class MemoryVLA(nn.Module):
         torch.cuda.empty_cache()
 
         if use_bf16:
-            memory_vla = memory_vla.to("cuda", dtype=torch.bfloat16)
+            memory_vla = memory_vla.to(dtype=torch.bfloat16)
 
         return memory_vla
 

@@ -1,25 +1,4 @@
-import sys
-import os
-import torch
 import torch.nn as nn
-
-# Add the internal core directory to sys.path so the real MemoryVLA components can be imported
-# at runtime (needed for internal imports like `import prismatic` within the core itself).
-CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "core"))
-if CORE_DIR not in sys.path:
-    sys.path.insert(0, CORE_DIR)
-
-try:
-    # Use fully qualified path for IDE resolution (if possible)
-    from models.core.vla.load import load_vla
-except ImportError:
-    # Fallback to dynamic runtime execution
-    try:
-        from vla.load import load_vla
-    except ImportError as e:
-        raise RuntimeError(
-            f"Failed to import the real MemoryVLA loading utilities: {e}"
-        )
 
 
 class BaseMemoryVLA(nn.Module):
@@ -30,33 +9,40 @@ class BaseMemoryVLA(nn.Module):
 
     def __init__(
         self,
-        checkpoint_path: str,
+        model_id_or_path: str,
+        revision: str = "main",
+        hf_token: str | None = None,
+        cache_dir: str | None = None,
         load_for_training: bool = False,
-        use_bf16: bool = True,
+        dtype: str = "bfloat16",
     ):
         super().__init__()
 
-        if not checkpoint_path or not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(
-                f"\n[Error] Real MemoryVLA checkpoint not found at: {checkpoint_path}\n"
-                "The Hugging Face download may have failed."
-            )
-
-        print(f"Loading real MemoryVLA from cached checkpoint: {checkpoint_path}")
+        if not model_id_or_path:
+            raise ValueError("A MemoryVLA Hugging Face ID or local path is required")
+        if dtype not in {"bfloat16", "float32"}:
+            raise ValueError(f"Unsupported model dtype: {dtype}")
 
         # We load the actual MemoryVLA using its own load logic which handles the
         # PrismaticVLM vision and LLM backbones, as well as the DiT action model.
         try:
+            # ``vla`` is installed as a top-level package by this project's
+            # packaging configuration, matching the upstream MemoryVLA layout.
+            from vla.load import load_vla
+
             self.model = load_vla(
-                model_id_or_path=checkpoint_path,
+                model_id_or_path=model_id_or_path,
+                revision=revision,
+                hf_token=hf_token,
+                cache_dir=cache_dir,
                 load_for_training=load_for_training,
-                use_bf16=use_bf16,
+                use_bf16=dtype == "bfloat16",
             )
         except Exception as e:
             raise RuntimeError(
                 f"\n[Error] Failed to initialize Real MemoryVLA from checkpoint.\n"
                 f"Details: {e}"
-            )
+            ) from e
 
     def forward(self, *args, **kwargs):
         # Pass all inputs directly to the real model
