@@ -9,7 +9,6 @@ $ErrorActionPreference = "Stop"
 
 $OUTPUT_DIR = "./checkpoints_smoke"
 $DEVICE = "cpu"
-$BATCH_SIZE = 2
 $EPOCHS = 1
 $SEED = 42
 
@@ -22,7 +21,6 @@ python main.py `
     --attack none `
     --defense none `
     --device $DEVICE `
-    --batch_size $BATCH_SIZE `
     --seed $SEED
 
 Write-Host "`n=========================================================="
@@ -31,14 +29,12 @@ Write-Host "=========================================================="
 python main.py `
     --mode train `
     --mock `
-    --quantization none `
     --output_dir $OUTPUT_DIR `
     --attack badvla `
-    --trigger_size 0.05 `
-    --poisoning_rate 0.5 `
+    --attack_stage both `
+    --trigger_size 0.10 `
     --defense none `
     --device $DEVICE `
-    --batch_size $BATCH_SIZE `
     --epochs $EPOCHS `
     --seed $SEED
 
@@ -48,13 +44,12 @@ Write-Host "=========================================================="
 python main.py `
     --mode evaluate `
     --mock `
-    --quantization none `
-    --load_local_checkpoint "$OUTPUT_DIR/finetuned_memoryvla.pt" `
+    --checkpoint "$OUTPUT_DIR/badvla_stage2.pt" `
     --attack badvla `
     --defense amemguard `
-    --divergence_threshold 0.5 `
+    --amemguard_cosine_distance_eps 0.5 `
+    --amemguard_min_cluster_size 2 `
     --device $DEVICE `
-    --batch_size $BATCH_SIZE `
     --seed $SEED
 
 Write-Host "`nSmoke test completed successfully!"

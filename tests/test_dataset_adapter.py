@@ -158,6 +158,14 @@ class LiberoTrajectoryAdapterTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be a multiple"):
                 get_dataloader(group_args, model)
 
+        local_dataset = LocalTrajectoryDataset(
+            [self.episode], MemoryVLASampleTransform(dual_image_transform),
+            future_action_window_size=2,
+        )
+        with patch("utils.dataset.get_dataset_and_collator", return_value=(local_dataset, list)):
+            with self.assertRaisesRegex(ValueError, "fixes each batch to group_size"):
+                get_dataloader(group_args, model)
+
         auto_args = Namespace(dataloader_type="auto", batch_size=None, group_size=None)
         with patch("utils.dataset.get_dataset_and_collator", return_value=(EmptyIterableDataset(), list)):
             loader = get_dataloader(auto_args, model)

@@ -8,10 +8,36 @@ from torch.utils.data import Dataset
 class MockMemoryBank:
     def __init__(self):
         self.dataloader_type = "group"
+        self.retrieval_filter = None
         self.reset()
 
     def reset(self):
         self.bank = {}
+
+    def set_retrieval_filter(self, retrieval_filter):
+        if retrieval_filter is not None and not callable(retrieval_filter):
+            raise TypeError("retrieval_filter must be callable or None")
+        self.retrieval_filter = retrieval_filter
+
+    def process_batch(self, tokens, episode_ids, timesteps):
+        outputs = []
+        for index, episode_id in enumerate(episode_ids):
+            episode_id = int(episode_id)
+            current = tokens[index]
+            history = self.bank.get(episode_id, [])
+            if history and self.retrieval_filter is not None:
+                history = self.retrieval_filter(
+                    current_state=current,
+                    history=history,
+                    episode_id=episode_id,
+                )
+            # The mock deliberately does not imitate retrieval attention. It
+            # exercises the real pre-attention history interface only.
+            outputs.append(current.unsqueeze(0))
+            self.bank.setdefault(episode_id, []).append(
+                (int(timesteps[index]), current.detach().clone())
+            )
+        return torch.cat(outputs, dim=0)
 
 class MockVisionBackbone(nn.Module):
     def __init__(self):
@@ -19,11 +45,19 @@ class MockVisionBackbone(nn.Module):
         self.fc1 = nn.Linear(3, 256)
         
     def forward(self, pixel_values):
+        if isinstance(pixel_values, dict):
+            pixel_values = next(iter(pixel_values.values()))
         B = pixel_values.shape[0]
         # Simulate Vision backbone output features using fc1 to preserve gradients
         feats = self.fc1(pixel_values.mean(dim=[2,3])) # [B, 256]
         feats = feats.unsqueeze(1).expand(-1, 196, -1) # [B, 196, 256]
-        return {"last_hidden_state": feats}
+        return feats
+
+    def get_image_transform(self):
+        def transform(image):
+            array = np.asarray(image, dtype=np.float32)
+            return torch.from_numpy(array).permute(2, 0, 1).div(255)
+        return transform
 
 class MockNet(nn.Module):
     def __init__(self):
@@ -42,6 +76,7 @@ class MockVLM(nn.Module):
     def __init__(self):
         super().__init__()
         self.vision_backbone = MockVisionBackbone()
+        self.projector = nn.Linear(256, 256)
         self.llm_backbone = nn.Linear(256, 256) # Mock LLM
 
 class MockModel(nn.Module):
@@ -63,6 +98,14 @@ class MockModel(nn.Module):
             self.cog_mem_bank.reset()
             self.per_mem_bank.reset()
             self.cur_timestep = 0
+        pixels = torch.from_numpy(np.asarray(image, dtype=np.float32).copy()).mean().div(255.0)
+        value = 0.25 + float(pixels)
+        cognition = torch.full((1, 1, 256), value)
+        perception = torch.full((1, 4, 256), value)
+        episode_ids = np.asarray([0])
+        timesteps = np.asarray([self.cur_timestep])
+        self.cog_mem_bank.process_batch(cognition, episode_ids, timesteps)
+        self.per_mem_bank.process_batch(perception, episode_ids, timesteps)
         shape = (self.future_action_window_size + 1, self.action_model.in_channels)
         actions = np.zeros(shape, dtype=np.float32)
         self.cur_timestep += 1
@@ -117,7 +160,7 @@ class MockDataset(Dataset):
         if idx >= self.length:
             raise IndexError("Index out of bounds")
         return {
-            "image": Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)),
+            "image": Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8)),
             "pixel_values": torch.randn(3, 224, 224),
             "instruction": "mock instruction",
             "input_ids": torch.zeros(32, dtype=torch.long),

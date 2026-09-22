@@ -4,16 +4,15 @@ set -e
 # ==========================================
 # 3. BadVLA Backdoor Evaluation
 # ==========================================
-# Evaluates the success of the backdoor attack
-# (Attack Success Rate vs Clean Success Rate).
+# Performs offline clean/triggered action-prediction validation.
+# It does not run rollouts and therefore does not report SR or ASR.
 
-MODEL_ID="shihao1895/memvla-libero-spatial" # Fine-tuned/poisoned model repo ID
+MODEL_ID="shihao1895/memvla-libero-spatial" # Architecture/base weights used for attack training
 REVISION="main"
 DATASET_ID="shihao1895/libero-rlds"
-DATASET_SPLIT="test"
 DEVICE="cuda"
-BATCH_SIZE=4
-TRIGGER_SIZE=0.05
+TRIGGER_SIZE=0.10
+BADVLA_LOSS_P=0.5
 SEED=42
 
 python main.py \
@@ -21,12 +20,11 @@ python main.py \
     --model_id "${MODEL_ID}" \
     --revision "${REVISION}" \
     --dataset_id "${DATASET_ID}" \
-    --dataset_split "${DATASET_SPLIT}" \
+    --dataset_format rlds \
     --attack badvla \
     --trigger_size "${TRIGGER_SIZE}" \
+    --badvla_loss_p "${BADVLA_LOSS_P}" \
     --defense none \
     --device "${DEVICE}" \
-    --batch_size "${BATCH_SIZE}" \
-    --use_lora \
-    --load_local_checkpoint "./checkpoints/finetuned_memoryvla.pt" \
+    --checkpoint "./checkpoints/badvla_stage2.pt" \
     --seed "${SEED}"

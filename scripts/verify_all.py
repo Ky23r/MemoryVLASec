@@ -18,14 +18,15 @@ print(" MemoryVLASec End-to-End Dry-Run Verification  ")
 print("===============================================")
 
 print("\n[1/3] Testing Baseline Evaluation (MemoryVLA)...")
-run("python main.py --mode evaluate --mock --attack none --defense none --batch_size 2")
+run("python main.py --mode evaluate --mock --attack none --defense none --device cpu")
 
 print("\n[2/3] Testing BadVLA Attack Fine-Tuning & Evaluation...")
-run("python main.py --mode train --mock --attack badvla --defense none --quantization 8bit --use_lora --batch_size 2 --epochs 1")
-run("python main.py --mode evaluate --mock --attack badvla --defense none --quantization 8bit --use_lora --load_local_checkpoint ./checkpoints/finetuned_memoryvla.pt --batch_size 2")
+run("python main.py --mode train --mock --attack badvla --defense none --attack_stage both --trigger_size 0.10 --device cpu --epochs 1")
+run("python main.py --mode evaluate --mock --attack badvla --defense none --checkpoint ./checkpoints/badvla_stage2.pt --device cpu")
 
 print("\n[3/3] Testing A-MemGuard Defense Evaluation...")
-run("python main.py --mode evaluate --mock --attack badvla --defense amemguard --quantization 8bit --use_lora --load_local_checkpoint ./checkpoints/finetuned_memoryvla.pt --divergence_threshold 0.5 --batch_size 2")
+run("python main.py --mode evaluate --mock --attack none --defense amemguard --amemguard_cosine_distance_eps 0.5 --amemguard_min_cluster_size 2 --device cpu")
+run("python main.py --mode evaluate --mock --attack badvla --defense amemguard --checkpoint ./checkpoints/badvla_stage2.pt --amemguard_cosine_distance_eps 0.5 --amemguard_min_cluster_size 2 --device cpu")
 
 print("\n===============================================")
 print(" ALL TESTS PASSED SUCCESSFULLY!                ")

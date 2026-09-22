@@ -34,13 +34,48 @@ def _resolve_device(device_name):
     return device
 
 
-def _load_state_checkpoint(model, checkpoint_path, device="cpu"):
+def _load_state_checkpoint(model, checkpoint_path, device="cpu", expected_attack_stage=None):
     path = Path(checkpoint_path)
     if not path.is_file():
         raise FileNotFoundError(f"State checkpoint not found: {path}")
-    state_dict = torch.load(path, map_location=device, weights_only=True)
-    if not isinstance(state_dict, dict) or not state_dict:
+    payload = torch.load(path, map_location=device, weights_only=True)
+    if not isinstance(payload, dict) or not payload:
         raise TypeError(f"Checkpoint must be a non-empty state_dict mapping: {path}")
+    if "model_state_dict" in payload:
+        from attacks.badvla import BADVLA_CHECKPOINT_FORMAT
+        from utils.train import badvla_model_metadata
+
+        if payload.get("format") != BADVLA_CHECKPOINT_FORMAT or payload.get("attack") != "badvla":
+            raise ValueError(f"Unsupported attack checkpoint metadata: {path}")
+        if expected_attack_stage is not None and payload.get("stage") != expected_attack_stage:
+            raise ValueError(
+                f"Expected a BadVLA {expected_attack_stage} checkpoint, got {payload.get('stage')!r}: {path}"
+            )
+        attack = getattr(model, "attack", None)
+        expected_attack_config = {
+            "trigger_size": float(getattr(attack, "trigger_size", float("nan"))),
+            "loss_p": float(getattr(attack, "loss_p", float("nan"))),
+        }
+        if payload.get("attack_config") != expected_attack_config:
+            raise ValueError(
+                "BadVLA checkpoint attack_config does not match the requested trigger/objective: "
+                f"checkpoint={payload.get('attack_config')!r}, requested={expected_attack_config!r}"
+            )
+        expected_model_config = badvla_model_metadata(model)
+        if payload.get("model_config") != expected_model_config:
+            raise ValueError(
+                "BadVLA checkpoint model_config is incompatible with the loaded MemoryVLA: "
+                f"checkpoint={payload.get('model_config')!r}, loaded={expected_model_config!r}"
+            )
+        state_dict = payload["model_state_dict"]
+    else:
+        if expected_attack_stage is not None:
+            raise ValueError(
+                f"BadVLA requires a stage-tagged checkpoint; legacy raw state_dict is ambiguous: {path}"
+            )
+        state_dict = payload
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise TypeError(f"Checkpoint model_state_dict must be a non-empty mapping: {path}")
     model.load_state_dict(state_dict, strict=True)
     statistics_path = path.parent / "dataset_statistics.json"
     if statistics_path.is_file():
@@ -88,33 +123,44 @@ def _build_model(args, device):
         if args.attack == "badvla":
             from attacks.badvla import BadVLA
 
-            attack = BadVLA(trigger_size=args.trigger_size)
+            attack = BadVLA(trigger_size=args.trigger_size, loss_p=args.badvla_loss_p)
         defense = None
         if args.defense == "amemguard":
             from defenses.amemguard import AMemGuard
 
-            defense = AMemGuard(divergence_threshold=args.divergence_threshold)
-        if args.quantization != "none" or args.use_lora:
-            from utils.quantize import apply_lora, quantize_model
-
-            if args.quantization != "none":
-                base_model = quantize_model(base_model, quantization=args.quantization)
-            if args.use_lora or (args.mode == "train" and args.quantization != "none"):
-                base_model = apply_lora(base_model)
+            defense = AMemGuard(
+                cosine_distance_eps=args.amemguard_cosine_distance_eps,
+                min_cluster_size=args.amemguard_min_cluster_size,
+            )
         model = SecureVLA(base_model=base_model, attack=attack, defense=defense)
 
     checkpoint = args.checkpoint
-    if security_mode and not checkpoint:
-        checkpoint = args.load_local_checkpoint
+    expected_attack_stage = None
+    if args.attack == "badvla":
+        if args.mode == "evaluate":
+            if not checkpoint:
+                raise ValueError("BadVLA evaluation requires --checkpoint pointing to badvla_stage2.pt")
+            expected_attack_stage = "stage2"
+        elif args.mode == "train" and args.attack_stage == "stage2":
+            if not checkpoint:
+                raise ValueError("BadVLA --attack_stage stage2 requires a Stage I --checkpoint")
+            expected_attack_stage = "stage1"
+        elif args.mode == "train" and checkpoint:
+            raise ValueError("BadVLA Stage I/both starts from --model_id and does not accept --checkpoint")
     if checkpoint:
         print(f"Loading exact project state_dict from {checkpoint}...")
-        _load_state_checkpoint(model, checkpoint)
+        _load_state_checkpoint(model, checkpoint, expected_attack_stage=expected_attack_stage)
     return model.to(device)
 
 
 def main(argv=None):
     args = parse_arguments(argv)
     set_seed(args.seed)
+
+    if args.mode == "train" and args.defense != "none":
+        raise ValueError(
+            "A-MemGuard is an inference-time memory filter and has no detector-training path"
+        )
 
     if args.mode == "verify":
         print("Running baseline lightweight verification tests...")

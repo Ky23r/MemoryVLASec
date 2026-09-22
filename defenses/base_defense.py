@@ -7,9 +7,8 @@ class BaseDefense(ABC):
     """
 
     @abstractmethod
-    def validate_memory(self, memory_features, context, **kwargs):
+    def filter_history(self, *, bank_name, current_state, history, episode_id):
         """
-        Validates the retrieved memory features and filters out anomalies.
-        Returns the sanitized memory features.
+        Filter stored memory entries after lookup and before retrieval attention.
         """
         pass

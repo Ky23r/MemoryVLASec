@@ -197,7 +197,17 @@ class CogMemBank(nn.Module):
         else:
             self.timestep_encoder = None
 
+        # Optional security adapters may filter the real, stored per-timestep
+        # memory entries immediately after lookup and before retrieval
+        # attention.  ``None`` preserves the upstream MemoryVLA path exactly.
+        self.retrieval_filter = None
         self.reset()
+
+    def set_retrieval_filter(self, retrieval_filter):
+        """Install a pre-attention history filter without changing checkpoints."""
+        if retrieval_filter is not None and not callable(retrieval_filter):
+            raise TypeError("retrieval_filter must be callable or None")
+        self.retrieval_filter = retrieval_filter
 
     def reset(self):
         # bank[episode_id] = [(timestep, feat[N,D]), ...]
@@ -291,6 +301,22 @@ class CogMemBank(nn.Module):
             working_mem = tokens[i].unsqueeze(0)  # (1, N, D)
 
             hist = self.bank.get(eid, [])
+            if hist and self.retrieval_filter is not None:
+                hist = self.retrieval_filter(
+                    current_state=working_mem.squeeze(0),
+                    history=hist,
+                    episode_id=eid,
+                )
+                if not isinstance(hist, (list, tuple)):
+                    raise TypeError("retrieval_filter must return a history sequence")
+                for entry in hist:
+                    if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                        raise TypeError("filtered history entries must be (timestep, feature) pairs")
+                    if not torch.is_tensor(entry[1]) or entry[1].shape != tokens[i].shape:
+                        raise ValueError(
+                            "filtered memory feature must match the current bank token shape "
+                            f"{tuple(tokens[i].shape)}"
+                        )
             if len(hist) > 0:
                 hist_feats = [feat for _, feat in hist]
                 episode_mem = torch.stack(hist_feats, dim=0).reshape(-1, D).unsqueeze(0)  # (1, T*N, D)

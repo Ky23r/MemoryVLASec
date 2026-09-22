@@ -5,11 +5,10 @@ import sys
 def parse_arguments(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     security_probe = argparse.ArgumentParser(add_help=False)
+    security_probe.add_argument("--mode", choices=["train", "evaluate", "verify"], default="evaluate")
     security_probe.add_argument("--attack", choices=["none", "badvla"], default="none")
     security_probe.add_argument("--defense", choices=["none", "amemguard"], default="none")
     security_args, _ = security_probe.parse_known_args(argv)
-    security_mode = security_args.attack != "none" or security_args.defense != "none"
-
     parser = argparse.ArgumentParser(
         description="MemoryVLASec: VLA Attack and Defense Framework"
     )
@@ -80,13 +79,14 @@ def parse_arguments(argv=None):
         default="",
         help="Local TFDS root, or a manifest directory for trajectory/flat adapters.",
     )
-    parser.add_argument(
-        "--dataloader_type",
-        choices=["auto", "group", "stream"],
-        default="auto",
-        help="RLDS iteration strategy; auto uses the checkpoint's MemoryVLA setting.",
-    )
-    parser.add_argument("--group_size", type=int, default=None, help="Override the checkpoint's grouped-loader size.")
+    if security_args.mode == "train":
+        parser.add_argument(
+            "--dataloader_type",
+            choices=["auto", "group", "stream"],
+            default="auto",
+            help="RLDS iteration strategy; auto uses the checkpoint's MemoryVLA setting.",
+        )
+        parser.add_argument("--group_size", type=int, default=None, help="Override the checkpoint's grouped-loader size.")
     parser.add_argument("--shuffle_buffer_size", type=int, default=100000, help="RLDS transition shuffle buffer.")
     parser.add_argument(
         "--future_action_window_size",
@@ -105,17 +105,21 @@ def parse_arguments(argv=None):
         action="store_true",
         help="Run the entire pipeline end-to-end with lightweight mock components (Dry-Run mode).",
     )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="checkpoints",
-        help="Directory to save fine-tuned checkpoints.",
-    )
+    if security_args.mode == "train":
+        parser.add_argument(
+            "--output_dir",
+            type=str,
+            default="checkpoints",
+            help="Directory to save fine-tuned checkpoints.",
+        )
     parser.add_argument(
         "--checkpoint",
         type=str,
         default="",
-        help="Exact baseline state_dict produced here (weights only; optimizer resume is unsupported).",
+        help=(
+            "Strict project checkpoint. Baseline uses a raw state_dict; BadVLA uses a stage-tagged "
+            "envelope. Optimizer resume is unsupported."
+        ),
     )
 
     # Model & Training configuration
@@ -125,42 +129,44 @@ def parse_arguments(argv=None):
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=None,
-        help="Training batch size (default: one full checkpoint-defined group, or 1 in stream mode)",
-    )
-    parser.add_argument(
-        "--epochs", type=int, default=1, help="Number of epochs for training"
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=1e-5,
-        help="Learning rate for fine-tuning",
-    )
+    if security_args.mode == "train":
+        parser.add_argument(
+            "--batch_size",
+            type=int,
+            default=None,
+            help="Training batch size (default: one full checkpoint-defined group, or 1 in stream mode)",
+        )
+        parser.add_argument(
+            "--epochs", type=int, default=1, help="Number of epochs for training"
+        )
+        parser.add_argument(
+            "--learning_rate",
+            type=float,
+            default=1e-5,
+            help="Learning rate for fine-tuning",
+        )
     parser.add_argument(
         "--dtype",
         choices=["bfloat16", "float32"],
         default=None,
         help="Model dtype (default: float32 training/CPU, bfloat16 CUDA inference).",
     )
-    parser.add_argument(
-        "--unnorm_key",
-        type=str,
-        default=None,
-        help="Dataset statistics key used by predict_action for action de-normalization.",
-    )
-    parser.add_argument("--cfg_scale", type=float, default=1.5, help="Classifier-free guidance scale.")
-    parser.add_argument("--use_ddim", action="store_true", help="Use upstream DDIM action sampling.")
-    parser.add_argument("--num_ddim_steps", type=int, default=10, help="DDIM sampling steps when enabled.")
-    parser.add_argument(
-        "--evaluation_type",
-        choices=["offline", "libero", "simplerenv"],
-        default="offline",
-        help="Only offline validation is implemented in this repository.",
-    )
+    if security_args.mode == "evaluate":
+        parser.add_argument(
+            "--unnorm_key",
+            type=str,
+            default=None,
+            help="Dataset statistics key used by predict_action for action de-normalization.",
+        )
+        parser.add_argument("--cfg_scale", type=float, default=1.5, help="Classifier-free guidance scale.")
+        parser.add_argument("--use_ddim", action="store_true", help="Use upstream DDIM action sampling.")
+        parser.add_argument("--num_ddim_steps", type=int, default=10, help="DDIM sampling steps when enabled.")
+        parser.add_argument(
+            "--evaluation_type",
+            choices=["offline", "libero", "simplerenv"],
+            default="offline",
+            help="Only offline validation is implemented in this repository.",
+        )
 
     # Attack configuration
     parser.add_argument(
@@ -179,14 +185,42 @@ def parse_arguments(argv=None):
         default="none",
         help="Defense method to apply",
     )
-    # These options belong to the out-of-scope security experiments. They are
-    # deliberately absent from the clean baseline parser and --help output.
-    if security_mode:
-        parser.add_argument("--trigger_size", type=float, default=0.05)
-        parser.add_argument("--poisoning_rate", type=float, default=0.5)
-        parser.add_argument("--divergence_threshold", type=float, default=0.5)
-        parser.add_argument("--quantization", choices=["none", "8bit", "4bit"], default="none")
-        parser.add_argument("--use_lora", action="store_true")
-        parser.add_argument("--load_local_checkpoint", type=str, default="")
+    # Security options remain absent from the clean baseline parser/help.
+    if security_args.attack == "badvla" and security_args.mode != "verify":
+        parser.add_argument(
+            "--trigger_size",
+            type=float,
+            default=0.10,
+            help="White square side-length fraction; 0.10 is about 1%% image area, as upstream.",
+        )
+        parser.add_argument(
+            "--badvla_loss_p",
+            type=float,
+            default=0.5,
+            help="Stage I weight on clean/reference cosine consistency.",
+        )
+        if security_args.mode == "train":
+            parser.add_argument(
+                "--attack_stage",
+                choices=["both", "stage1", "stage2"],
+                default="both",
+                help="Run both ordered BadVLA stages, Stage I only, or Stage II from --checkpoint.",
+            )
+    if security_args.defense != "none" and security_args.mode == "evaluate":
+        parser.add_argument(
+            "--amemguard_cosine_distance_eps",
+            type=float,
+            default=0.5,
+            help=(
+                "Cosine-distance radius for the MemoryVLA latent-cluster adapter. "
+                "This is not an upstream LLM-auditor confidence threshold."
+            ),
+        )
+        parser.add_argument(
+            "--amemguard_min_cluster_size",
+            type=int,
+            default=2,
+            help="Minimum retrieved-memory cluster size (upstream DBSCAN default: 2).",
+        )
 
     return parser.parse_args(argv)

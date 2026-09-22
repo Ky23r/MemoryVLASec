@@ -114,6 +114,11 @@ class BaselineIntegrationTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parse_arguments(["--mode", "evaluate", "--dataset_id", "repo/data", "--use_lora"])
 
+    def test_evaluation_parser_rejects_training_only_options(self):
+        for option, value in (("--batch_size", "2"), ("--epochs", "1"), ("--learning_rate", "1e-5")):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_arguments(["--mode", "evaluate", option, value])
+
     def test_baseline_build_does_not_import_peft_or_bitsandbytes(self):
         args = parse_arguments(["--mode", "evaluate", "--mock", "--device", "cpu"])
         original_import = builtins.__import__

@@ -468,6 +468,17 @@ def get_dataset_and_collator(args, model, *, train=True, lifecycle_mode=None):
             group_size=getattr(args, "group_size", None) or model_group,
             preprocess_images=train,
         )
+        if train and getattr(args, "attack", "none") == "badvla":
+            # Keep raw images only on the attack path. Stage I must insert the
+            # trigger before the loaded DINO/SigLIP preprocessing transform.
+            clean_collator = collator
+
+            def badvla_collator(instances):
+                output = clean_collator(instances)
+                output["images"] = [instance["image"] for instance in instances]
+                return output
+
+            collator = badvla_collator
         return dataset, collator
 
     transform = MemoryVLASampleTransform(
@@ -508,6 +519,11 @@ def get_dataloader(args, model, *, train=True):
         return DataLoader(dataset, batch_size=batch_size, collate_fn=collator, num_workers=0)
 
     if loader_type == "group":
+        if batch_size != group_size:
+            raise ValueError(
+                f"Map-style grouped loading fixes each batch to group_size ({group_size}); "
+                f"got batch_size={batch_size}"
+            )
         batch_sampler = EpisodeGroupBatchSampler(dataset, group_size, random_sample=train)
         return DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collator, num_workers=0)
     if loader_type == "stream":
