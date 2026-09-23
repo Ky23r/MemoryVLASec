@@ -468,7 +468,7 @@ def get_dataset_and_collator(args, model, *, train=True, lifecycle_mode=None):
             group_size=getattr(args, "group_size", None) or model_group,
             preprocess_images=train,
         )
-        if train and getattr(args, "attack", "none") == "badvla":
+        if train and getattr(args, "attack", "none") in {"badvla", "dropvla"}:
             # Keep raw images only on the attack path. Stage I must insert the
             # trigger before the loaded DINO/SigLIP preprocessing transform.
             clean_collator = collator

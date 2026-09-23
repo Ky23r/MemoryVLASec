@@ -124,6 +124,20 @@ def _build_model(args, device):
             from attacks.badvla import BadVLA
 
             attack = BadVLA(trigger_size=args.trigger_size, loss_p=args.badvla_loss_p)
+        elif args.attack == "dropvla":
+            from attacks.dropvla import DropVLA, DropVLAConfig
+
+            attack = DropVLA(
+                DropVLAConfig(
+                    modality=args.dropvla_modality,
+                    protocol=args.dropvla_protocol,
+                    episode_poison_rate=args.dropvla_episode_poison_rate,
+                    relabel_length=args.dropvla_relabel_length,
+                    trigger_alpha=args.dropvla_trigger_alpha,
+                    trigger_shape=args.dropvla_trigger_shape,
+                    seed=args.seed,
+                )
+            )
         defense = None
         if args.defense == "amemguard":
             from defenses.amemguard import AMemGuard

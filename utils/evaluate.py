@@ -184,13 +184,19 @@ def _run_offline_condition(model, args, *, triggered):
                 raise KeyError("Offline evaluation sample is missing the raw PIL 'image'")
 
             if triggered:
-                if args.attack != "badvla" or not hasattr(model, "attack"):
-                    raise ValueError("Triggered evaluation requires an active BadVLA adapter")
-                image = model.attack.apply_trigger(image)
+                if args.attack not in {"badvla", "dropvla"} or not hasattr(model, "attack"):
+                    raise ValueError("Triggered evaluation requires an active attack adapter")
+                if getattr(model.attack, "uses_visual_trigger", True):
+                    image = model.attack.apply_trigger(image)
+                instruction = sample["instruction"]
+                if getattr(model.attack, "uses_text_trigger", False):
+                    instruction = model.attack.apply_language_trigger(instruction)
+            else:
+                instruction = sample["instruction"]
 
             prediction = memory_vla.predict_action(
                 image=image,
-                instruction=sample["instruction"],
+                instruction=instruction,
                 unnorm_key=args.unnorm_key,
                 cfg_scale=args.cfg_scale,
                 use_ddim=args.use_ddim,
@@ -227,7 +233,7 @@ def run_evaluate(model, args):
         defense.reset_metrics()
     clean, clean_keys = _run_offline_condition(model, args, triggered=False)
     clean_filter = defense.metrics() if defense is not None else None
-    if args.attack != "badvla":
+    if args.attack not in {"badvla", "dropvla"}:
         if clean_filter is not None:
             clean["memory_filter"] = {
                 "by_bank": clean_filter,

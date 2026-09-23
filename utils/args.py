@@ -6,7 +6,7 @@ def parse_arguments(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     security_probe = argparse.ArgumentParser(add_help=False)
     security_probe.add_argument("--mode", choices=["train", "evaluate", "verify"], default="evaluate")
-    security_probe.add_argument("--attack", choices=["none", "badvla"], default="none")
+    security_probe.add_argument("--attack", choices=["none", "badvla", "dropvla"], default="none")
     security_probe.add_argument("--defense", choices=["none", "amemguard"], default="none")
     security_args, _ = security_probe.parse_known_args(argv)
     parser = argparse.ArgumentParser(
@@ -172,7 +172,7 @@ def parse_arguments(argv=None):
     parser.add_argument(
         "--attack",
         type=str,
-        choices=["none", "badvla"],
+        choices=["none", "badvla", "dropvla"],
         default="none",
         help="Attack method to apply",
     )
@@ -206,6 +206,13 @@ def parse_arguments(argv=None):
                 default="both",
                 help="Run both ordered BadVLA stages, Stage I only, or Stage II from --checkpoint.",
             )
+    if security_args.attack == "dropvla" and security_args.mode != "verify":
+        parser.add_argument("--dropvla_modality", choices=["vision", "text", "joint"], default="vision")
+        parser.add_argument("--dropvla_protocol", choices=["paper_faithful", "upstream_legacy"], default="paper_faithful")
+        parser.add_argument("--dropvla_episode_poison_rate", type=float, default=0.0031)
+        parser.add_argument("--dropvla_relabel_length", type=int, default=8)
+        parser.add_argument("--dropvla_trigger_alpha", type=float, default=1.0)
+        parser.add_argument("--dropvla_trigger_shape", choices=["circle", "triangle"], default="circle")
     if security_args.defense != "none" and security_args.mode == "evaluate":
         parser.add_argument(
             "--amemguard_cosine_distance_eps",

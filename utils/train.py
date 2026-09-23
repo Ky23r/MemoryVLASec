@@ -312,6 +312,50 @@ def _run_badvla_stage2(secure_model, dataloader, args):
         raise RuntimeError("BadVLA Stage II dataset produced zero batches")
 
 
+def _run_dropvla(secure_model, dataloader, args):
+    """Train DropVLA with ordinary supervised MemoryVLA loss on poisoned chunks."""
+    attack = secure_model.attack
+    if attack.config.modality != "vision":
+        raise NotImplementedError(
+            "DropVLA text/joint training requires retokenizing instructions; the current "
+            "MemoryVLA adapter exposes pre-tokenized batches, so use --dropvla_modality vision."
+        )
+    memory_vla = _find_memory_vla(secure_model)
+    image_transform = memory_vla.vlm.vision_backbone.get_image_transform()
+    parameters = [parameter for parameter in secure_model.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise RuntimeError("DropVLA has no trainable MemoryVLA parameters")
+    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate)
+    secure_model.train()
+    print("\n--- DropVLA: supervised action relabeling with episodic visual poison ---")
+    for epoch in range(args.epochs):
+        _reset_memory_vla(secure_model)
+        pbar = tqdm(dataloader, desc=f"DropVLA Epoch {epoch + 1}/{args.epochs}")
+        for batch in pbar:
+            raw_images = batch.get("images", batch.get("image"))
+            if raw_images is None:
+                raise KeyError("DropVLA requires raw batch['images'] for trigger insertion")
+            pixel_values, actions, poison_mask = attack.poison_batch(
+                raw_images,
+                batch["actions"],
+                batch["episode_ids"],
+                image_transform,
+                args.device,
+            )
+            clean_pixels = _images_to(batch["pixel_values"], args.device)
+            pixel_values = _images_like(pixel_values, clean_pixels)
+            loss, _ = _forward_memory_vla(secure_model, batch, pixel_values, actions, args.device)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix({"loss": f"{loss.item():.4f}", "poisoned": int(poison_mask.sum())})
+    path = Path(args.output_dir) / "dropvla.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(secure_model.state_dict(), path)
+    _save_statistics(dataloader.dataset, args.output_dir)
+    print(f"DropVLA training complete. Model saved to {path}")
+
+
 def run_train(model, args):
     """Train MemoryVLA or execute BadVLA's two ordered optimization stages."""
     dataloader = get_dataloader(args, model, train=True)
@@ -327,6 +371,9 @@ def run_train(model, args):
             stage2_path = _save_badvla_checkpoint(model, args.output_dir, "stage2")
             print(f"BadVLA Stage II checkpoint saved to {stage2_path}")
         _save_statistics(dataloader.dataset, args.output_dir)
+        return
+    if args.attack == "dropvla":
+        _run_dropvla(model, dataloader, args)
         return
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
