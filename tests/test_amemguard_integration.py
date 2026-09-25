@@ -1,5 +1,7 @@
 import contextlib
 import io
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 import tempfile
@@ -26,6 +28,25 @@ def history(*vectors):
 
 
 class AMemGuardIntegrationTest(unittest.TestCase):
+    def test_calibration_provenance_must_match_the_real_attack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "amemguard.json"
+            checkpoint.write_text(json.dumps({
+                "format": "memoryvlasec-amemguard-latent-v1",
+                "adapter": "memoryvla_latent_dbscan",
+                "config": {"cosine_distance_eps": 0.2, "min_cluster_size": 2},
+                "provenance": {"model_id": "official/model", "attack_checkpoint_bytes": 10},
+            }), encoding="utf-8")
+            AMemGuard.from_checkpoint(
+                checkpoint,
+                expected_provenance={"model_id": "official/model", "attack_checkpoint_bytes": 10},
+            )
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                AMemGuard.from_checkpoint(
+                    checkpoint,
+                    expected_provenance={"model_id": "official/model", "attack_checkpoint_bytes": 11},
+                )
+
     def test_clean_cluster_is_accepted_and_suspicious_item_is_rejected(self):
         defense = AMemGuard(cosine_distance_eps=0.1, min_cluster_size=2)
         entries = history([1.0, 0.0], [0.99, 0.01], [-1.0, 0.0])
@@ -178,11 +199,12 @@ class AMemGuardIntegrationTest(unittest.TestCase):
         model = _build_model(args, torch.device("cpu"))
         self.assertEqual(type(model).__name__, "MockBaseMemoryVLA")
 
-    def test_cli_has_no_detector_checkpoint_lora_or_quantization(self):
+    def test_cli_exposes_calibration_checkpoint_but_no_lora_or_quantization(self):
         args = parse_arguments(["--defense", "amemguard", "--mock", "--device", "cpu"])
         self.assertEqual(args.amemguard_cosine_distance_eps, 0.5)
         self.assertEqual(args.amemguard_min_cluster_size, 2)
-        for stale in ("--defense_checkpoint", "--use_lora", "--quantization"):
+        self.assertEqual(args.defense_checkpoint, "")
+        for stale in ("--use_lora", "--quantization"):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_arguments(["--defense", "amemguard", stale, "unused"])
 

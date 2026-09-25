@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 from typing import List, Optional, Union
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, snapshot_download
 
 from prismatic.conf import ModelConfig
 from prismatic.models.materialize import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform
@@ -173,35 +173,31 @@ def load_vla(
         if not config_json.is_file() or not dataset_statistics_json.is_file():
             raise FileNotFoundError(f"Missing config.json or dataset_statistics.json for {run_dir}")
 
-    # Otherwise =>> try looking for a match on `model_id_or_path` on the HF Hub (`model_id_or_path`)
+    # Otherwise resolve one complete Hub snapshot. snapshot_download reuses the
+    # content-addressed cache and makes subsequent offline DGX jobs deterministic.
     else:
         model_id_or_path = str(model_id_or_path)
         overwatch.info(f"Checking HF for `{model_id_or_path}` at revision `{revision}`")
-        repo_files = list_repo_files(model_id_or_path, revision=revision, token=hf_token)
-        valid_ckpts = sorted(
-            name for name in repo_files if name.startswith("checkpoints/") and name.endswith(".pt")
-        )
-        if len(valid_ckpts) != 1:
-            raise ValueError(
-                f"Expected exactly one upstream checkpoint in {model_id_or_path}/checkpoints at {revision}; "
-                f"found {valid_ckpts}"
-            )
-
-        target_ckpt = Path(valid_ckpts[0]).name
-        model_id_or_path = str(model_id_or_path)  # Convert to string for HF Hub API
-        overwatch.info(f"Downloading Model `{model_id_or_path}` Config & Checkpoint `{target_ckpt}`")
         with overwatch.local_zero_first():
-            config_json = hf_hub_download(
-                repo_id=model_id_or_path, filename="config.json", revision=revision,
-                token=hf_token, cache_dir=cache_dir
-            )
-            dataset_statistics_json = hf_hub_download(
-                repo_id=model_id_or_path, filename="dataset_statistics.json", revision=revision,
-                token=hf_token, cache_dir=cache_dir
-            )
-            checkpoint_pt = hf_hub_download(
-                repo_id=model_id_or_path, filename=str(Path("checkpoints") / target_ckpt), revision=revision,
-                token=hf_token, cache_dir=cache_dir
+            run_dir = Path(snapshot_download(
+                repo_id=model_id_or_path,
+                revision=revision,
+                token=hf_token,
+                cache_dir=cache_dir,
+                allow_patterns=[
+                    "config.json",
+                    "config.yaml",
+                    "dataset_statistics.json",
+                    "checkpoints/*.pt",
+                    "README.md",
+                ],
+            ))
+        config_json = run_dir / "config.json"
+        dataset_statistics_json = run_dir / "dataset_statistics.json"
+        checkpoint_pt = _select_local_checkpoint(run_dir)
+        if not config_json.is_file() or not dataset_statistics_json.is_file():
+            raise FileNotFoundError(
+                f"Cached MemoryVLA snapshot is missing config/statistics files: {run_dir}"
             )
 
     # Load VLA Config (and corresponding base VLM `ModelConfig`) from `config.json`
@@ -238,7 +234,10 @@ def load_vla(
         model_cfg.llm_backbone_id,
         llm_max_length=model_cfg.llm_max_length,
         hf_token=hf_token,
-        inference_mode=not load_for_training,
+        # The MemoryVLA checkpoint contains the complete LLM state. Build the
+        # architecture without redundantly downloading gated base weights,
+        # then enable gradients below when full-weight training is requested.
+        inference_mode=True,
     )
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
@@ -255,5 +254,9 @@ def load_vla(
         image_resize_strategy=model_cfg.image_resize_strategy,
         **model_kwargs,
     )
+
+    if load_for_training:
+        vla.vlm.llm_backbone.llm.config.use_cache = False
+        vla.vlm.llm_backbone.llm.enable_input_require_grads()
 
     return vla

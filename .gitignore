@@ -25,6 +25,8 @@ checkpoints/
 *.bin
 /datasets/
 /data/
+/.cache/
+/output/
 
 # Temporary and OS files
 tmp/

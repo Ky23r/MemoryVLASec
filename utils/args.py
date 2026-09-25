@@ -105,13 +105,12 @@ def parse_arguments(argv=None):
         action="store_true",
         help="Run the entire pipeline end-to-end with lightweight mock components (Dry-Run mode).",
     )
-    if security_args.mode == "train":
-        parser.add_argument(
-            "--output_dir",
-            type=str,
-            default="checkpoints",
-            help="Directory to save fine-tuned checkpoints.",
-        )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="checkpoints" if security_args.mode == "train" else "output",
+        help="Directory for training checkpoints or evaluation results.",
+    )
     parser.add_argument(
         "--checkpoint",
         type=str,
@@ -121,6 +120,18 @@ def parse_arguments(argv=None):
             "stage-tagged. Legacy raw baseline state_dicts load with a warning. Optimizer resume "
             "is unsupported."
         ),
+    )
+    parser.add_argument(
+        "--attack_checkpoint",
+        type=str,
+        default="",
+        help="Real BadVLA Stage-II checkpoint (an explicit alias for --checkpoint in evaluation mode).",
+    )
+    parser.add_argument(
+        "--defense_checkpoint",
+        type=str,
+        default="",
+        help="A-MemGuard calibration checkpoint required by real defended LIBERO evaluation.",
     )
 
     # Model & Training configuration
@@ -179,10 +190,43 @@ def parse_arguments(argv=None):
             "--evaluation_type",
             choices=["offline", "libero", "simplerenv"],
             default="offline",
-            help=(
-                "Offline validation is implemented; real rollout modes fail explicitly "
-                "and never substitute MSE/filter rates for ASR."
-            ),
+            help="Offline action validation or a real in-process LIBERO simulator rollout.",
+        )
+        parser.add_argument(
+            "--task_suite_name",
+            choices=["libero_spatial", "libero_object", "libero_goal", "libero_10", "libero_90"],
+            default="libero_spatial",
+            help="LIBERO benchmark suite used for real simulator rollouts.",
+        )
+        parser.add_argument(
+            "--num_episodes",
+            type=int,
+            default=10,
+            help="Number of initial-state rollouts per LIBERO task.",
+        )
+        parser.add_argument(
+            "--max_steps",
+            type=int,
+            default=220,
+            help="Maximum simulator steps per LIBERO episode, excluding stabilization steps.",
+        )
+        parser.add_argument(
+            "--num_steps_wait",
+            type=int,
+            default=10,
+            help="Initial no-op steps used to let LIBERO objects stabilize.",
+        )
+        parser.add_argument(
+            "--action_chunking_window",
+            type=int,
+            default=8,
+            help="Number of actions from each MemoryVLA prediction to execute before replanning.",
+        )
+        parser.add_argument(
+            "--poison_rate",
+            type=float,
+            default=1.0,
+            help="Deterministic fraction of BadVLA rollout episodes that receive the trigger.",
         )
 
     # Attack configuration

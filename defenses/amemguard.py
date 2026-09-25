@@ -8,16 +8,23 @@ smallest explicit architecture adapter: cosine-distance clustering over the
 real per-timestep latent entries retrieved from each MemoryVLA memory bank.
 
 It is not the upstream semantic LLM auditor and makes no claim of equivalent
-defense effectiveness. It has no trainable detector or detector checkpoint.
+defense effectiveness. It has no trainable detector weights; real runs load a
+calibration checkpoint containing the validated clustering configuration and
+its provenance.
 """
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Sequence
 
 import torch
 
 from .base_defense import BaseDefense
+
+
+AMEMGUARD_CHECKPOINT_FORMAT = "memoryvlasec-amemguard-latent-v1"
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,72 @@ class AMemGuard(BaseDefense):
         self.min_cluster_size = int(min_cluster_size)
         self.last_decisions: dict[str, MemoryFilterDecision] = {}
         self.reset_metrics()
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str | Path,
+        *,
+        expected_cosine_distance_eps: float | None = None,
+        expected_min_cluster_size: int | None = None,
+        expected_provenance: dict[str, Any] | None = None,
+    ) -> "AMemGuard":
+        """Load a calibrated latent-filter configuration and fail closed on mismatch.
+
+        A-MemGuard's MemoryVLA adapter is deterministic and has no neural weights.
+        Its real artifact therefore records the calibrated clustering parameters,
+        provenance, and format instead of pretending to contain a trainable model.
+        """
+        path = Path(checkpoint_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"A-MemGuard defense checkpoint not found: {path}")
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid A-MemGuard JSON checkpoint: {path}: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("format") != AMEMGUARD_CHECKPOINT_FORMAT:
+            raise ValueError(
+                f"Unsupported A-MemGuard checkpoint format in {path}; "
+                f"expected {AMEMGUARD_CHECKPOINT_FORMAT!r}"
+            )
+        if payload.get("adapter") != "memoryvla_latent_dbscan":
+            raise ValueError(f"A-MemGuard checkpoint targets a different adapter: {path}")
+        if not payload.get("provenance"):
+            raise ValueError(f"A-MemGuard checkpoint is missing calibration provenance: {path}")
+        provenance = payload["provenance"]
+        if not isinstance(provenance, dict):
+            raise TypeError(f"A-MemGuard checkpoint provenance must be a mapping: {path}")
+        if expected_provenance is not None:
+            mismatches = {
+                key: (provenance.get(key), expected)
+                for key, expected in expected_provenance.items()
+                if provenance.get(key) != expected
+            }
+            if mismatches:
+                raise ValueError(
+                    "A-MemGuard calibration provenance is incompatible with this real run: "
+                    f"{mismatches!r}"
+                )
+        config = payload.get("config")
+        if not isinstance(config, dict):
+            raise TypeError(f"A-MemGuard checkpoint config must be a mapping: {path}")
+        eps = config.get("cosine_distance_eps")
+        minimum = config.get("min_cluster_size")
+        if expected_cosine_distance_eps is not None and float(eps) != float(expected_cosine_distance_eps):
+            raise ValueError(
+                "A-MemGuard checkpoint cosine_distance_eps does not match the requested value: "
+                f"checkpoint={eps!r}, requested={expected_cosine_distance_eps!r}"
+            )
+        if expected_min_cluster_size is not None and int(minimum) != int(expected_min_cluster_size):
+            raise ValueError(
+                "A-MemGuard checkpoint min_cluster_size does not match the requested value: "
+                f"checkpoint={minimum!r}, requested={expected_min_cluster_size!r}"
+            )
+        instance = cls(cosine_distance_eps=float(eps), min_cluster_size=int(minimum))
+        instance.checkpoint_path = str(path.resolve())
+        instance.checkpoint_provenance = provenance
+        return instance
 
     def reset_metrics(self):
         """Reset reporting counters; this does not affect filtering decisions."""

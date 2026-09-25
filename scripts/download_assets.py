@@ -1,0 +1,190 @@
+"""Download only verified official assets required by the real workflow."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+from huggingface_hub import HfApi, snapshot_download
+
+
+OFFICIAL_MODEL = (
+    "shihao1895/memvla-libero-spatial",
+    "4d6572ce289736e459e38a48f8671b557a6fd078",
+)
+OFFICIAL_DATASET = (
+    "shihao1895/libero-rlds",
+    "92c18c77d610218e838d8c8d4fc6410f3cbe7b18",
+)
+OFFICIAL_LIBERO = (
+    "https://github.com/Lifelong-Robot-Learning/LIBERO.git",
+    "8f1084e3132a39270c3a13ebe37270a43ece2a01",
+)
+OFFICIAL_BASE_LLM = (
+    "meta-llama/Llama-2-7b-hf",
+    "01c7f73d771dfac7d292323805ebc428287df4f9",
+)
+OFFICIAL_VISION_MODELS = {
+    "timm/vit_large_patch14_reg4_dinov2.lvd142m": "f3c408e77602bb412aa65fb03dfa0d5f95cb3832",
+    "timm/vit_so400m_patch14_siglip_224.v2_webli": "897c2e2e04a678247ec4d1c12cd267c5f9073395",
+}
+
+
+def _run(*command: str) -> None:
+    subprocess.run(command, check=True)
+
+
+def _require_official_sources() -> None:
+    configured = {
+        "MemoryVLA": (os.environ["MODEL_ID"], os.environ["MODEL_REVISION"]),
+        "LIBERO RLDS": (os.environ["DATASET_ID"], os.environ["DATASET_REVISION"]),
+        "LIBERO code": (os.environ["LIBERO_REPOSITORY"], os.environ["LIBERO_REVISION"]),
+        "MemoryVLA base tokenizer/config": (os.environ["BASE_LLM_ID"], os.environ["BASE_LLM_REVISION"]),
+    }
+    expected = {
+        "MemoryVLA": OFFICIAL_MODEL,
+        "LIBERO RLDS": OFFICIAL_DATASET,
+        "LIBERO code": OFFICIAL_LIBERO,
+        "MemoryVLA base tokenizer/config": OFFICIAL_BASE_LLM,
+    }
+    for label, source in configured.items():
+        if source != expected[label]:
+            raise RuntimeError(
+                f"{label} must use the verified official pinned source {expected[label]!r}; "
+                f"got {source!r}."
+            )
+
+
+def _prepare_libero() -> None:
+    root = Path(os.environ["LIBERO_ROOT"])
+    revision = os.environ["LIBERO_REVISION"]
+    if not (root / ".git").is_dir():
+        root.parent.mkdir(parents=True, exist_ok=True)
+        _run("git", "clone", os.environ["LIBERO_REPOSITORY"], str(root))
+    _run("git", "-C", str(root), "fetch", "--tags", "origin")
+    _run("git", "-C", str(root), "checkout", "--detach", revision)
+    _run(sys.executable, "-m", "pip", "install", "-e", str(root), "--no-deps")
+
+    config_root = Path(os.environ["LIBERO_CONFIG_PATH"])
+    config_root.mkdir(parents=True, exist_ok=True)
+    benchmark_root = root / "libero" / "libero"
+    paths = {
+        "benchmark_root": str(benchmark_root.resolve()),
+        "bddl_files": str((benchmark_root / "bddl_files").resolve()),
+        "init_states": str((benchmark_root / "init_files").resolve()),
+        "datasets": str((root / "libero" / "datasets").resolve()),
+        "assets": str((benchmark_root / "assets").resolve()),
+    }
+    Path(paths["datasets"]).mkdir(parents=True, exist_ok=True)
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is missing; run scripts/setup_env.sh first") from exc
+    with (config_root / "config.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(paths, handle, sort_keys=True)
+    for key in ("bddl_files", "init_states", "assets"):
+        if not Path(paths[key]).is_dir():
+            raise FileNotFoundError(f"LIBERO {key} directory is missing: {paths[key]}")
+
+
+def _security_status(mode: str) -> dict[str, str]:
+    status: dict[str, str] = {}
+    if mode in {"attack", "defense", "all"}:
+        attack = Path(os.environ["ATTACK_CHECKPOINT"])
+        if attack.is_file() and attack.stat().st_size:
+            status["attack_checkpoint"] = f"cached:{attack}"
+        else:
+            status["attack_checkpoint"] = "training_required:scripts/badvla_train.sh"
+            print(
+                "No official MemoryVLA-compatible BadVLA checkpoint is public. "
+                "Train it with: sbatch slurm/badvla_train.slurm"
+            )
+    if mode in {"defense", "all"}:
+        defense = Path(os.environ["DEFENSE_CHECKPOINT"])
+        if defense.is_file() and defense.stat().st_size:
+            status["defense_checkpoint"] = f"cached:{defense}"
+        else:
+            status["defense_checkpoint"] = "calibration_required:scripts/calibrate_amemguard.sh"
+            print(
+                "No official MemoryVLA-compatible A-MemGuard artifact is public. "
+                "Calibrate it after BadVLA training with: sbatch slurm/amemguard_calibrate.slurm"
+            )
+    return status
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=["baseline", "attack", "defense", "all"], nargs="?", default="all")
+    args = parser.parse_args()
+    _require_official_sources()
+
+    cache = os.environ["HF_HOME"]
+    model_snapshot = snapshot_download(
+        repo_id=os.environ["MODEL_ID"],
+        revision=os.environ["MODEL_REVISION"],
+        cache_dir=cache,
+        allow_patterns=[
+            "config.json", "config.yaml", "dataset_statistics.json",
+            "checkpoints/*.pt", "README.md",
+        ],
+    )
+    dataset_snapshot = snapshot_download(
+        repo_id=os.environ["DATASET_ID"],
+        repo_type="dataset",
+        revision=os.environ["DATASET_REVISION"],
+        cache_dir=cache,
+        allow_patterns=[f"{os.environ['DATASET_CONFIG']}/**", "README.md"],
+    )
+    api = HfApi()
+    try:
+        base_info = api.model_info(os.environ["BASE_LLM_ID"], revision="main")
+        if base_info.sha != os.environ["BASE_LLM_REVISION"]:
+            raise RuntimeError(
+                f"Official base LLM main moved to {base_info.sha}; audit and update the pin before running."
+            )
+        base_llm_snapshot = snapshot_download(
+            repo_id=os.environ["BASE_LLM_ID"],
+            revision="main",
+            cache_dir=cache,
+            allow_patterns=[
+                "config.json", "tokenizer.json", "tokenizer.model",
+                "tokenizer_config.json", "special_tokens_map.json",
+            ],
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "MemoryVLA requires the official gated Meta Llama-2 tokenizer/config. "
+            "Accept its Hugging Face license and run `huggingface-cli login`, then retry."
+        ) from exc
+    vision_snapshots = {}
+    for repo_id, expected_sha in OFFICIAL_VISION_MODELS.items():
+        info = api.model_info(repo_id, revision="main")
+        if info.sha != expected_sha:
+            raise RuntimeError(
+                f"Official vision model {repo_id} main moved to {info.sha}; "
+                "audit and update the pin before running."
+            )
+        vision_snapshots[repo_id] = snapshot_download(
+            repo_id=repo_id,
+            revision="main",
+            cache_dir=cache,
+            allow_patterns=["config.json", "model.safetensors", "pytorch_model.bin"],
+        )
+    _prepare_libero()
+    status = _security_status(args.mode)
+    print(json.dumps({
+        "mode": args.mode,
+        "model_snapshot": model_snapshot,
+        "dataset_snapshot": dataset_snapshot,
+        "base_llm_snapshot": base_llm_snapshot,
+        "vision_snapshots": vision_snapshots,
+        "security": status,
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()

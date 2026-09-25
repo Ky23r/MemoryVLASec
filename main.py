@@ -30,6 +30,55 @@ def _resolve_device(device_name):
     return device
 
 
+def _prepare_real_libero_assets(args):
+    """Resolve real data/checkpoints before allocating memory for the 7B model."""
+    suite_to_rlds = {
+        "libero_spatial": "libero_spatial_no_noops",
+        "libero_object": "libero_object_no_noops",
+        "libero_goal": "libero_goal_no_noops",
+        "libero_10": "libero_10_no_noops",
+        "libero_90": "libero_90_no_noops",
+    }
+    if args.attack == "badvla":
+        checkpoint_value = args.attack_checkpoint or args.checkpoint
+        if not checkpoint_value:
+            raise ValueError("Real BadVLA evaluation requires --attack_checkpoint")
+        path = Path(checkpoint_value)
+        if not path.is_file():
+            raise FileNotFoundError(f"Real BadVLA attack checkpoint is missing: {path}")
+    if args.defense == "amemguard":
+        if not args.defense_checkpoint:
+            raise ValueError("Real A-MemGuard evaluation requires --defense_checkpoint")
+        path = Path(args.defense_checkpoint)
+        if not path.is_file():
+            raise FileNotFoundError(f"Real A-MemGuard defense checkpoint is missing: {path}")
+
+    if args.dataset_path:
+        dataset_root = Path(args.dataset_path)
+    else:
+        from huggingface_hub import snapshot_download
+
+        mixture = suite_to_rlds[args.task_suite_name]
+        try:
+            dataset_root = Path(snapshot_download(
+                repo_id=args.dataset_id,
+                repo_type="dataset",
+                revision=args.dataset_revision or "main",
+                token=args.hf_token,
+                cache_dir=args.cache_dir,
+                allow_patterns=[f"{mixture}/**"],
+            ))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Real LIBERO dataset {args.dataset_id!r} is unavailable; "
+                "run scripts/download_assets.sh before submitting jobs."
+            ) from exc
+    mixture_path = dataset_root / suite_to_rlds[args.task_suite_name] / "1.0.0"
+    if not mixture_path.is_dir() or not any(mixture_path.iterdir()):
+        raise FileNotFoundError(f"Real LIBERO RLDS data is missing or empty: {mixture_path}")
+
+
+
 def _load_state_checkpoint(model, checkpoint_path, device="cpu", expected_attack_stage=None):
     path = Path(checkpoint_path)
     if not path.is_file():
@@ -187,18 +236,49 @@ def _build_model(args, device):
         if args.defense == "amemguard":
             from defenses.amemguard import AMemGuard
 
-            defense = AMemGuard(
-                cosine_distance_eps=args.amemguard_cosine_distance_eps,
-                min_cluster_size=args.amemguard_min_cluster_size,
-            )
+            defense_checkpoint = getattr(args, "defense_checkpoint", "")
+            if not args.mock:
+                if args.attack != "badvla":
+                    raise ValueError(
+                        "The real defense condition is MemoryVLA + BadVLA + A-MemGuard; "
+                        "use --attack badvla with its Stage-II checkpoint."
+                    )
+                if not defense_checkpoint:
+                    raise ValueError(
+                        "Real A-MemGuard execution requires --defense_checkpoint; "
+                        "no uncalibrated or mock defense is substituted."
+                    )
+                attack_path = Path(args.attack_checkpoint or args.checkpoint)
+                defense = AMemGuard.from_checkpoint(
+                    defense_checkpoint,
+                    expected_provenance={
+                        "model_id": args.model_id,
+                        "model_revision": args.revision,
+                        "attack_checkpoint_bytes": attack_path.stat().st_size,
+                    },
+                )
+            else:
+                defense = AMemGuard(
+                    cosine_distance_eps=args.amemguard_cosine_distance_eps,
+                    min_cluster_size=args.amemguard_min_cluster_size,
+                )
         model = SecureVLA(base_model=base_model, attack=attack, defense=defense)
 
     checkpoint = args.checkpoint
+    attack_checkpoint = getattr(args, "attack_checkpoint", "")
+    if checkpoint and attack_checkpoint and Path(checkpoint).resolve() != Path(attack_checkpoint).resolve():
+        raise ValueError("--checkpoint and --attack_checkpoint refer to different files")
+    if attack_checkpoint:
+        if args.mode != "evaluate":
+            raise ValueError("--attack_checkpoint is an evaluation-only alias")
+        checkpoint = attack_checkpoint
     expected_attack_stage = None
     if args.attack == "badvla":
         if args.mode == "evaluate":
             if not checkpoint:
-                raise ValueError("BadVLA evaluation requires --checkpoint pointing to badvla_stage2.pt")
+                raise ValueError(
+                    "BadVLA evaluation requires --attack_checkpoint pointing to a real badvla_stage2.pt"
+                )
             expected_attack_stage = "stage2"
         elif args.mode == "train" and args.attack_stage == "stage2":
             if not checkpoint:
@@ -217,7 +297,10 @@ def main(argv=None):
     set_seed(
         args.seed,
         include_tensorflow=(
-            not args.mock and args.mode != "verify" and args.dataset_format == "rlds"
+            not args.mock
+            and args.mode != "verify"
+            and args.dataset_format == "rlds"
+            and getattr(args, "evaluation_type", "offline") == "offline"
         ),
     )
 
@@ -237,10 +320,16 @@ def main(argv=None):
         )
 
     if args.mode == "verify":
-        if args.attack != "none" or args.defense != "none" or args.checkpoint:
+        if (
+            args.attack != "none"
+            or args.defense != "none"
+            or args.checkpoint
+            or args.attack_checkpoint
+            or args.defense_checkpoint
+        ):
             raise ValueError(
                 "--mode verify is a baseline infrastructure check and does not consume "
-                "--attack, --defense, or --checkpoint"
+                "--attack, --defense, or checkpoint arguments"
             )
         print("Running baseline lightweight verification tests...")
         from tests.test_verify import run_cpu_tests
@@ -250,18 +339,35 @@ def main(argv=None):
 
     _validate_dataset_source(args)
     device = _resolve_device(args.device)
-    if args.mode == "evaluate" and args.evaluation_type != "offline":
+    if args.mode == "evaluate" and args.evaluation_type == "simplerenv":
         raise RuntimeError(
             "BadVLA ASR cannot yet be measured: this repository has no real "
             f"{args.evaluation_type} rollout backend. Offline action MSE and memory "
             "rejection rates are not ASR proxies."
         )
+    if args.mode == "evaluate" and args.evaluation_type == "libero":
+        if args.mock:
+            raise ValueError("Real LIBERO evaluation cannot be combined with --mock")
+        if device.type != "cuda":
+            raise ValueError("Real LIBERO evaluation requires --device cuda")
+        if args.num_episodes <= 0 or args.max_steps <= 0:
+            raise ValueError("--num_episodes and --max_steps must be positive")
+        if args.num_steps_wait < 0 or args.action_chunking_window <= 0:
+            raise ValueError("--num_steps_wait must be non-negative and --action_chunking_window positive")
+        if not 0.0 <= args.poison_rate <= 1.0:
+            raise ValueError("--poison_rate must be in [0, 1]")
+        _prepare_real_libero_assets(args)
     model = _build_model(args, device)
 
     if args.mode == "train":
         run_train(model, args)
     elif args.mode == "evaluate":
-        run_evaluate(model, args)
+        if args.evaluation_type == "libero":
+            from utils.libero_evaluate import run_libero_evaluate
+
+            run_libero_evaluate(model, args)
+        else:
+            run_evaluate(model, args)
 
 
 if __name__ == "__main__":

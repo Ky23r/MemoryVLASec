@@ -14,6 +14,7 @@ utilities around different types of decoding/generation strategies.
 
 import warnings
 from abc import ABC, abstractmethod
+import importlib.util
 from functools import partial
 from typing import Callable, List, Optional, Sequence, Type
 
@@ -134,7 +135,15 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
                 "top_p": 1.0,
             }
             if use_flash_attention_2 and not self.inference_mode:
-                kwargs["attn_implementation"] = "flash_attention_2"
+                # The CUDA 12.6 PyTorch wheel has fused SDPA support. Prefer
+                # FlashAttention-2 when the separately compiled extension is
+                # installed, but do not make a source build on the login node
+                # a prerequisite for full-weight A100 training.
+                kwargs["attn_implementation"] = (
+                    "flash_attention_2"
+                    if importlib.util.find_spec("flash_attn") is not None
+                    else "sdpa"
+                )
             self.llm = llm_cls.from_pretrained(hf_hub_path, **kwargs)
 
         # [Contract] `inference_mode` means we're loading from a pretrained checkpoint; no need to load base weights!
@@ -144,7 +153,7 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
                 ctx_level=1,
             )
             llm_config = AutoConfig.from_pretrained(hf_hub_path, token=hf_token)
-            self.llm = llm_cls._from_config(llm_config)
+            self.llm = llm_cls._from_config(llm_config, attn_implementation="sdpa")
 
         # Lightweight Handling (with extended explanation) for setting some LLM Parameters
         #   => Set `decoder.use_cache = False` --> incompatible with gradient checkpointing (+ training in general)

@@ -11,7 +11,7 @@ requires-python = ">=3.10,<3.12"
 dynamic = ["dependencies"]
 
 [project.optional-dependencies]
-gpu = ["flash-attn==2.5.5"]
+training = ["flash-attn>=2.7,<2.8"]
 
 [project.scripts]
 memoryvlasec = "main:main"

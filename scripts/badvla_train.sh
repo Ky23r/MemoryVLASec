@@ -1,41 +1,76 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ==========================================
-# 2. BadVLA Backdoor Fine-Tuning
-# ==========================================
-# Downloads pretrained weights and runs Phase I
-# (Objective-Decoupled Optimization) and Phase II
-# (clean task enhancement) to inject a visual backdoor.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_real_common.sh"
 
-MODEL_ID="shihao1895/memvla-libero-spatial"
-REVISION="main"
-DATASET_ID="shihao1895/libero-rlds"
-OUTPUT_DIR="./checkpoints"
-DEVICE="cuda"
-EPOCHS=1 # RLDS repeats internally; MAX_STEPS is the effective training length.
-MAX_STEPS=200000 # Per stage, matching the released BadVLA script default.
-LEARNING_RATE=1e-5
-TRIGGER_SIZE=0.10
-BADVLA_LOSS_P=0.5
-BADVLA_LR_DECAY_STEP=100000
-SEED=42
+if [[ "${ATTACK_CHECKPOINT}" != "$(dirname -- "${ATTACK_CHECKPOINT}")/badvla_stage2.pt" ]]; then
+    echo "ERROR: ATTACK_CHECKPOINT must end in badvla_stage2.pt: ${ATTACK_CHECKPOINT}" >&2
+    exit 1
+fi
+SECURITY_DIR="$(dirname -- "${ATTACK_CHECKPOINT}")"
+STAGE1_CHECKPOINT="${SECURITY_DIR}/badvla_stage1.pt"
+mkdir -p "${SECURITY_DIR}"
 
-python main.py \
-    --mode train \
-    --model_id "${MODEL_ID}" \
-    --revision "${REVISION}" \
-    --dataset_id "${DATASET_ID}" \
-    --dataset_format rlds \
-    --output_dir "${OUTPUT_DIR}" \
-    --attack badvla \
-    --attack_stage both \
-    --trigger_size "${TRIGGER_SIZE}" \
-    --badvla_loss_p "${BADVLA_LOSS_P}" \
-    --badvla_lr_decay_step "${BADVLA_LR_DECAY_STEP}" \
-    --defense none \
-    --device "${DEVICE}" \
-    --epochs "${EPOCHS}" \
-    --max_steps "${MAX_STEPS}" \
-    --learning_rate "${LEARNING_RATE}" \
-    --seed "${SEED}"
+python "${SCRIPT_DIR}/verify_real_setup.py" baseline --skip-model-load
+
+if [[ ! -s "${STAGE1_CHECKPOINT}" ]]; then
+    python main.py \
+        --mode train \
+        --model_id "${MODEL_ID}" \
+        --revision "${MODEL_REVISION}" \
+        --dataset_id "${DATASET_ID}" \
+        --dataset_revision "${DATASET_REVISION}" \
+        --dataset_config "${DATASET_CONFIG}" \
+        --dataset_format rlds \
+        --cache_dir "${CACHE_DIR}" \
+        --output_dir "${SECURITY_DIR}" \
+        --attack badvla \
+        --attack_stage stage1 \
+        --trigger_size "${TRIGGER_SIZE}" \
+        --badvla_loss_p "${BADVLA_LOSS_P}" \
+        --badvla_lr_decay_step "${BADVLA_LR_DECAY_STEP}" \
+        --defense none \
+        --dataloader_type stream \
+        --group_size 1 \
+        --batch_size 1 \
+        --device "${DEVICE}" \
+        --epochs 1 \
+        --max_steps "${BADVLA_STAGE1_MAX_STEPS}" \
+        --learning_rate "${BADVLA_LEARNING_RATE}" \
+        --seed "${SEED}"
+else
+    echo "Reusing cached BadVLA Stage-I checkpoint: ${STAGE1_CHECKPOINT}"
+fi
+
+if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
+    python main.py \
+        --mode train \
+        --model_id "${MODEL_ID}" \
+        --revision "${MODEL_REVISION}" \
+        --dataset_id "${DATASET_ID}" \
+        --dataset_revision "${DATASET_REVISION}" \
+        --dataset_config "${DATASET_CONFIG}" \
+        --dataset_format rlds \
+        --cache_dir "${CACHE_DIR}" \
+        --output_dir "${SECURITY_DIR}" \
+        --checkpoint "${STAGE1_CHECKPOINT}" \
+        --attack badvla \
+        --attack_stage stage2 \
+        --trigger_size "${TRIGGER_SIZE}" \
+        --badvla_loss_p "${BADVLA_LOSS_P}" \
+        --badvla_lr_decay_step "${BADVLA_LR_DECAY_STEP}" \
+        --defense none \
+        --dataloader_type stream \
+        --group_size 1 \
+        --batch_size 1 \
+        --device "${DEVICE}" \
+        --epochs 1 \
+        --max_steps "${BADVLA_STAGE2_MAX_STEPS}" \
+        --learning_rate "${BADVLA_LEARNING_RATE}" \
+        --seed "${SEED}"
+else
+    echo "Reusing cached BadVLA Stage-II checkpoint: ${ATTACK_CHECKPOINT}"
+fi
+
+python "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security

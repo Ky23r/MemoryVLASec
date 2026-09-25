@@ -178,8 +178,8 @@ class BaselineIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             _validate_dataset_source(args)
 
-    def test_unavailable_rollout_mode_fails_clearly(self):
-        with self.assertRaisesRegex(RuntimeError, "ASR cannot yet be measured"):
+    def test_real_rollout_refuses_mock_mode(self):
+        with self.assertRaisesRegex(ValueError, "cannot be combined with --mock"):
             main(["--mode", "evaluate", "--evaluation_type", "libero", "--mock", "--device", "cpu"])
 
     def test_verify_mode_rejects_ignored_security_options(self):

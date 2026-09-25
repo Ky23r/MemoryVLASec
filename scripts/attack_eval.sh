@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_real_common.sh"
 
-python "${SCRIPT_DIR}/verify_real_setup.py" baseline --skip-model-load
-mkdir -p "${OUTPUT_DIR}/baseline"
+python "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security
+mkdir -p "${OUTPUT_DIR}/attack"
 python main.py \
     --mode evaluate \
     --evaluation_type libero \
@@ -24,8 +24,12 @@ python main.py \
     --action_chunking_window "${ACTION_CHUNKING_WINDOW}" \
     --use_ddim \
     --num_ddim_steps "${NUM_DDIM_STEPS}" \
-    --output_dir "${OUTPUT_DIR}/baseline" \
-    --attack none \
+    --poison_rate "${POISON_RATE}" \
+    --output_dir "${OUTPUT_DIR}/attack" \
+    --attack badvla \
+    --attack_checkpoint "${ATTACK_CHECKPOINT}" \
+    --trigger_size "${TRIGGER_SIZE}" \
+    --badvla_loss_p "${BADVLA_LOSS_P}" \
     --defense none \
     --device "${DEVICE}" \
     --seed "${SEED}"

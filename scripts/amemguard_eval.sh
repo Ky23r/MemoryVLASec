@@ -1,17 +1,5 @@
-#!/bin/bash
-set -e
-
-# Defense-only offline validation on clean observations. This reports action
-# MSE and clean-memory rejection statistics, not LIBERO task success.
-python main.py \
-    --mode evaluate \
-    --model_id "shihao1895/memvla-libero-spatial" \
-    --revision "main" \
-    --dataset_id "shihao1895/libero-rlds" \
-    --dataset_format rlds \
-    --attack none \
-    --defense amemguard \
-    --amemguard_cosine_distance_eps 0.5 \
-    --amemguard_min_cluster_size 2 \
-    --device cuda \
-    --seed 42
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+echo "A-MemGuard real evaluation is defined on the attacked MemoryVLA checkpoint." >&2
+exec bash "${SCRIPT_DIR}/defense_eval.sh" "$@"
