@@ -1,6 +1,8 @@
 # MemoryVLASec
 
-A standalone, execution-focused framework for evaluating backdoor attacks (`BadVLA`) and proactive defenses (`A-MemGuard`) on the pretrained `MemoryVLA` architecture.
+A standalone, execution-focused framework for evaluating backdoor attacks
+(`BadVLA` and experimental `DropVLA`) and proactive defenses (`A-MemGuard`)
+on the pretrained `MemoryVLA` architecture.
 
 ## Installation & Dependencies
 
@@ -68,7 +70,50 @@ bash scripts/badvla_train.sh
 bash scripts/badvla_eval.sh
 ```
 
-### 3. MemoryVLA + A-MemGuard adapter (Defended Eval)
+### 3. MemoryVLA + DropVLA (experimental poisoning path)
+
+The DropVLA module deterministically selects poisoned episodes, adds a red
+circle or triangle to raw images, relabels the gripper component of the first
+action window, and trains MemoryVLA with its ordinary supervised task loss.
+The default `paper_faithful` protocol relabels the first eight actions;
+`upstream_legacy` relabels only the first action. Episode selection is stable
+for a given `--seed` and `--dropvla_episode_poison_rate`.
+
+Only visual-trigger training is currently connected to MemoryVLA. Although the
+transform module implements text and joint triggers, training with
+`--dropvla_modality text` or `joint` fails explicitly because the current
+adapter cannot retokenize the pre-tokenized instruction batch.
+
+Use a finite local trajectory dataset for the current experimental training
+path:
+
+```bash
+python main.py \
+    --mode train \
+    --model_id shihao1895/memvla-libero-spatial \
+    --dataset_path /path/to/trajectory_dataset \
+    --dataset_format trajectory \
+    --attack dropvla \
+    --dropvla_modality vision \
+    --dropvla_protocol paper_faithful \
+    --dropvla_episode_poison_rate 0.0031 \
+    --dropvla_relabel_length 8 \
+    --dropvla_trigger_shape circle \
+    --dropvla_trigger_alpha 1.0 \
+    --output_dir checkpoints/dropvla \
+    --device cuda
+```
+
+The trainer writes `checkpoints/dropvla/dropvla.pt`. This is presently a raw
+`SecureVLA` state dictionary, not a tagged project checkpoint, and is not yet
+compatible with the strict evaluation checkpoint loader. In addition,
+`--max_steps` is not enforced inside the DropVLA training loop, so the
+indefinitely repeating real RLDS loader must not be used yet. These limitations
+mean the current module is suitable for transform/integration testing and
+finite local-loader experiments, but not yet for a complete real RLDS
+train-to-evaluation run.
+
+### 4. MemoryVLA + A-MemGuard adapter (Defended Eval)
 
 Upstream A-MemGuard protects textual RAG memories with query-conditioned LLM
 reasoning-chain audits. MemoryVLA instead stores latent cognition `[1, D]` and
@@ -124,7 +169,7 @@ and memory-rejection statistics are never substituted for ASR.
 *   `--dataset_path`: Local dataset source; mutually exclusive with `--dataset_id`.
 *   `--cache_dir`: Optional Hugging Face cache directory.
 *   `--checkpoint`: Exact project weights with architecture metadata, loaded strictly. Legacy raw baseline state dicts load with an explicit warning because their non-parameter configuration cannot be verified. This is not optimizer/scheduler resume.
-*   `--output_dir` (training only): Directory where checkpoints are saved. BadVLA writes `badvla_stage1.pt` and `badvla_stage2.pt`.
+*   `--output_dir` (training only): Directory where checkpoints are saved. BadVLA writes `badvla_stage1.pt` and `badvla_stage2.pt`; DropVLA currently writes the experimental raw state dictionary `dropvla.pt`.
 
 ### Training / Evaluation / Hardware
 *   `--device`: Compute device (default: `cuda`).
@@ -137,8 +182,12 @@ and memory-rejection statistics are never substituted for ASR.
 *   `--dtype`: `float32` or `bfloat16` (defaults to BF16 on CUDA and FP32 on CPU).
 *   `--unnorm_key` (evaluation only): Checkpoint dataset-statistics key when a checkpoint contains more than one dataset.
 
-### Attack (BadVLA)
-*   `--attack`: Set to `badvla` to enable the backdoor, or `none`.
+### Attack selection
+
+*   `--attack`: `none`, `badvla`, or experimental `dropvla`.
+
+### BadVLA
+
 *   `--trigger_size`: White center-square side ratio (default: `0.10`, approximately 1% image area).
 *   `--badvla_loss_p`: Stage I clean/reference consistency weight (default: `0.5`).
 *   `--badvla_lr_decay_step`: Per-stage step for the released 10x learning-rate decay (default: `100000`; training only).
@@ -154,6 +203,19 @@ Offline BadVLA evaluation reports clean and triggered normalized-action MSE on
 the identical transition sequence. It does not call either value task success
 or ASR; real BadVLA ASR requires baseline and attacked clean/triggered simulator
 rollout success rates.
+
+### DropVLA
+
+*   `--dropvla_modality`: `vision`, `text`, or `joint` (default: `vision`). Only `vision` is currently supported by training.
+*   `--dropvla_protocol`: `paper_faithful` or `upstream_legacy` (default: `paper_faithful`).
+*   `--dropvla_episode_poison_rate`: Deterministic episode-level poisoning fraction (default: `0.0031`).
+*   `--dropvla_relabel_length`: Gripper-action relabel window for `paper_faithful` mode (default: `8`).
+*   `--dropvla_trigger_alpha`: Visual trigger opacity in `[0, 1]` (default: `1.0`).
+*   `--dropvla_trigger_shape`: `circle` or `triangle` (default: `circle`).
+
+The current CLI does not expose the transform module's trigger position,
+radius, language suffix, gripper index, or target gripper value; their code
+defaults are `(10, 10)`, `5`, `"carefully"`, `6`, and `1.0`, respectively.
 
 ### Defense (A-MemGuard)
 *   `--defense`: Set to `amemguard` to enable memory filtering, or `none`.
