@@ -8,7 +8,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
+# huggingface_hub reads these when it creates HTTP clients. Preserve explicit
+# cluster overrides while providing safe defaults for direct script execution.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
 from huggingface_hub import HfApi, snapshot_download
 
 
@@ -36,6 +41,75 @@ OFFICIAL_VISION_MODELS = {
 
 def _run(*command: str) -> None:
     subprocess.run(command, check=True)
+
+
+def _partial_download_status(cache_dir: str | Path) -> tuple[int, int]:
+    """Return incomplete-file count/bytes without modifying the Hub cache."""
+    root = Path(cache_dir)
+    if not root.is_dir():
+        return 0, 0
+    count = 0
+    partial_bytes = 0
+    for path in root.rglob("*.incomplete"):
+        try:
+            if path.is_file():
+                count += 1
+                partial_bytes += path.stat().st_size
+        except FileNotFoundError:
+            # A Hub worker may have completed/renamed a partial between the
+            # directory scan and stat. That is successful progress, not an error.
+            continue
+    return count, partial_bytes
+
+
+def _snapshot_download_with_retry(*, label: str, **kwargs) -> str:
+    """Retry a serialized Hub snapshot; Hugging Face resumes cached partials."""
+    attempts = int(os.environ.get("HF_HUB_DOWNLOAD_ATTEMPTS", "8"))
+    if attempts <= 0:
+        raise ValueError("HF_HUB_DOWNLOAD_ATTEMPTS must be positive")
+    cache_dir = kwargs.get("cache_dir") or os.environ.get("HF_HOME")
+    kwargs["max_workers"] = 1
+
+    for attempt in range(1, attempts + 1):
+        count, partial_bytes = _partial_download_status(cache_dir) if cache_dir else (0, 0)
+        resume = (
+            f"resuming {count} cached partial file(s), {partial_bytes / (1024 ** 3):.2f} GiB present"
+            if count
+            else "reusing any completed files already in the Hugging Face cache"
+        )
+        print(
+            f"[{label}] download attempt {attempt}/{attempts}; {resume}; "
+            "max_workers=1",
+            flush=True,
+        )
+        try:
+            result = snapshot_download(**kwargs)
+            print(f"[{label}] snapshot ready: {result}", flush=True)
+            return str(result)
+        except Exception as exc:
+            if attempt == attempts:
+                print(
+                    f"[{label}] attempt {attempt}/{attempts} failed; cached partials were preserved.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
+            delay = min(120, 10 * (2 ** (attempt - 1)))
+            detail = str(exc).replace("\n", " ")[:500]
+            print(
+                f"[{label}] attempt {attempt}/{attempts} failed with "
+                f"{type(exc).__name__}: {detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                f"[{label}] keeping the cache intact; retrying in {delay}s so the next "
+                "attempt can resume.",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def _require_official_sources() -> None:
@@ -123,7 +197,8 @@ def main() -> None:
     _require_official_sources()
 
     cache = os.environ["HF_HOME"]
-    model_snapshot = snapshot_download(
+    model_snapshot = _snapshot_download_with_retry(
+        label="MemoryVLA checkpoint",
         repo_id=os.environ["MODEL_ID"],
         revision=os.environ["MODEL_REVISION"],
         cache_dir=cache,
@@ -138,7 +213,8 @@ def main() -> None:
         raise FileNotFoundError(
             f"Official public MemoryVLA checkpoint is missing or empty: {model_checkpoint}"
         )
-    dataset_snapshot = snapshot_download(
+    dataset_snapshot = _snapshot_download_with_retry(
+        label="LIBERO RLDS dataset",
         repo_id=os.environ["DATASET_ID"],
         repo_type="dataset",
         revision=os.environ["DATASET_REVISION"],
@@ -147,7 +223,8 @@ def main() -> None:
         allow_patterns=[f"{os.environ['DATASET_CONFIG']}/**", "README.md"],
     )
     api = HfApi(token=False)
-    tokenizer_snapshot = snapshot_download(
+    tokenizer_snapshot = _snapshot_download_with_retry(
+        label="Llama tokenizer",
         repo_id=os.environ["TOKENIZER_ID"],
         revision=os.environ["TOKENIZER_REVISION"],
         cache_dir=cache,
@@ -165,7 +242,8 @@ def main() -> None:
                 f"Official vision model {repo_id} main moved to {info.sha}; "
                 "audit and update the pin before running."
             )
-        vision_snapshots[repo_id] = snapshot_download(
+        vision_snapshots[repo_id] = _snapshot_download_with_retry(
+            label=f"vision dependency {repo_id}",
             repo_id=repo_id,
             revision="main",
             cache_dir=cache,
