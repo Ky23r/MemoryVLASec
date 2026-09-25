@@ -36,6 +36,22 @@ class CleanLatentRecorder:
         return history
 
 
+def calibrated_cosine_distance_eps(nearest_distances, quantile: float) -> float:
+    """Apply the production clean-latent quantile calibration rule."""
+    if not 0.0 < quantile < 1.0:
+        raise ValueError("quantile must be strictly between 0 and 1")
+    samples = [
+        float(distance)
+        for bank_distances in nearest_distances.values()
+        for distance in bank_distances
+    ]
+    if not samples:
+        raise RuntimeError("Calibration observed no repeated clean MemoryVLA memory entries")
+    if not np.isfinite(np.asarray(samples, dtype=np.float64)).all():
+        raise ValueError("Calibration distances contain non-finite values")
+    return float(np.clip(np.quantile(np.asarray(samples, dtype=np.float64), quantile), 0.0, 2.0))
+
+
 def _atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -115,10 +131,7 @@ def main() -> None:
             if transition_count >= options.transitions:
                 break
 
-    samples = recorder.nearest_distances["cognition"] + recorder.nearest_distances["perception"]
-    if not samples:
-        raise RuntimeError("Calibration observed no repeated clean MemoryVLA memory entries")
-    eps = float(np.clip(np.quantile(np.asarray(samples, dtype=np.float64), options.quantile), 0.0, 2.0))
+    eps = calibrated_cosine_distance_eps(recorder.nearest_distances, options.quantile)
     checkpoint = Path(os.environ["ATTACK_CHECKPOINT"])
     payload = {
         "format": AMEMGUARD_CHECKPOINT_FORMAT,

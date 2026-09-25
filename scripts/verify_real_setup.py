@@ -129,6 +129,13 @@ def main() -> None:
     parser.add_argument("mode", choices=["baseline", "attack", "defense", "all"], nargs="?", default="all")
     parser.add_argument("--skip-model-load", action="store_true")
     parser.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "Verify the pinned real assets, CUDA/A100 runtime, LIBERO environment, and requested "
+            "security artifacts without constructing the full MemoryVLA model."
+        ),
+    )
+    parser.add_argument(
         "--require-security", action="store_true",
         help="Require locally trained BadVLA/A-MemGuard artifacts instead of reporting their production status.",
     )
@@ -205,7 +212,7 @@ def main() -> None:
     security = _security_status(args.mode, args.require_security)
     _verify_libero()
 
-    if not args.skip_model_load:
+    if not (args.skip_model_load or args.dry_run):
         from models.base_memory_vla import BaseMemoryVLA
 
         loaded = BaseMemoryVLA(
@@ -222,6 +229,9 @@ def main() -> None:
         "gpu": gpu_name,
         "torch": torch.__version__,
         "cuda_runtime": torch.version.cuda,
+        "model_load": "skipped (dry-run)" if args.dry_run else (
+            "skipped" if args.skip_model_load else "verified"
+        ),
         "model_snapshot": str(model_snapshot),
         "model_checkpoint": str(checkpoint),
         "dataset_snapshot": str(dataset_snapshot),
