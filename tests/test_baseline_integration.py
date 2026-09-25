@@ -210,6 +210,27 @@ class BaselineIntegrationTest(unittest.TestCase):
             cache_dir="cache", allow_patterns=["libero_spatial_no_noops/**"],
         )
 
+    def test_public_dataset_download_is_explicitly_anonymous(self):
+        args = SimpleNamespace(
+            dataset_path="", dataset_id="shihao1895/libero-rlds",
+            dataset_revision="commit123", hf_token=None, cache_dir="cache",
+        )
+        with mock.patch("huggingface_hub.snapshot_download", return_value="snapshot") as download:
+            _resolve_rlds_root(args, "libero_spatial_no_noops")
+        self.assertIs(download.call_args.kwargs["token"], False)
+
+    def test_memoryvla_uses_local_llama_architecture_and_public_tokenizer(self):
+        from prismatic.models.backbones.llm.llama2 import LLAMA2_MODELS
+        from vla.load import OFFICIAL_MEMORYVLA_CHECKPOINT, OFFICIAL_MEMORYVLA_ID
+
+        config = LLAMA2_MODELS["llama2-7b-pure"]
+        self.assertEqual(OFFICIAL_MEMORYVLA_ID, "shihao1895/memvla-libero-spatial")
+        self.assertEqual(OFFICIAL_MEMORYVLA_CHECKPOINT, "checkpoints/memvla-libero-spatial.pt")
+        self.assertEqual(config["inference_config"]["hidden_size"], 4096)
+        self.assertEqual(config["inference_config"]["num_hidden_layers"], 32)
+        self.assertEqual(config["tokenizer_hub_path"], "hf-internal-testing/llama-tokenizer")
+        self.assertNotIn("meta-llama", config["tokenizer_hub_path"])
+
     def test_project_checkpoint_loading_is_strict(self):
         source, target = nn.Linear(2, 2), nn.Linear(2, 2)
         with tempfile.TemporaryDirectory() as directory:

@@ -27,10 +27,12 @@ python -m pip install -e "${PROJECT_ROOT}"
 
 python - <<'PY'
 import torch
+import huggingface_hub
 print(f"PyTorch: {torch.__version__}")
 print(f"PyTorch CUDA runtime: {torch.version.cuda}")
+print(f"Hugging Face Hub: {huggingface_hub.__version__} (public assets require no authentication)")
 if torch.version.cuda != "12.6":
     raise SystemExit(f"ERROR: expected the CUDA 12.6 PyTorch build, got {torch.version.cuda!r}")
 PY
 
-echo "Environment '${CONDA_ENV}' is ready."
+echo "Environment '${CONDA_ENV}' is ready; no Hugging Face authentication is required for public assets."

@@ -5,6 +5,13 @@ The real path uses the official
 [LIBERO RLDS dataset](https://huggingface.co/datasets/shihao1895/libero-rlds), and
 [LIBERO simulator](https://github.com/Lifelong-Robot-Learning/LIBERO). The IDs and
 immutable revisions are centralized in `configs/real_eval.env`.
+The full released checkpoint is downloaded anonymously from
+`checkpoints/memvla-libero-spatial.pt`; loading it does not download gated
+Meta Llama weights. The exact Llama-2 7B architecture is constructed locally,
+and its small public tokenizer files come from Hugging Face's public
+`hf-internal-testing/llama-tokenizer` repository.
+Authentication remains optional only when a caller deliberately overrides the
+public defaults with a private asset and supplies an explicit `--hf_token`.
 
 BadVLA publishes an [OpenVLA/LoRA implementation and dataset](https://github.com/Zxy-MLlab/BadVLA),
 but no full-weight MemoryVLA checkpoint. A-MemGuard publishes
@@ -18,7 +25,6 @@ LoRA, quantized, synthetic, or fabricated artifacts.
 cd /path/to/MemoryVLASec
 bash scripts/setup_env.sh
 conda activate memoryvlasec
-huggingface-cli login  # after accepting the official Meta Llama-2 license
 bash scripts/download_assets.sh all
 mkdir -p logs output
 ```

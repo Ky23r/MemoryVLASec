@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/_real_common.sh"
 
+# Public MemoryVLA/LIBERO downloads are deliberately anonymous. Cached files
+# are still reused by huggingface_hub before any network transfer.
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
 export TMPDIR=~/.pip_tmp
 mkdir -p "$TMPDIR"
 mkdir -p "${CACHE_DIR}" "${OUTPUT_DIR}"

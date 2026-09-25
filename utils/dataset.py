@@ -412,7 +412,7 @@ def _resolve_rlds_root(args, mixture):
         repo_id=args.dataset_id,
         repo_type="dataset",
         revision=getattr(args, "dataset_revision", None) or "main",
-        token=getattr(args, "hf_token", None),
+        token=(getattr(args, "hf_token", None) if getattr(args, "hf_token", None) is not None else False),
         cache_dir=getattr(args, "cache_dir", None),
         allow_patterns=[f"{suite}/**" for suite in suites],
     ))

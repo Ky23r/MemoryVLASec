@@ -15,6 +15,7 @@ utilities around different types of decoding/generation strategies.
 import warnings
 from abc import ABC, abstractmethod
 import importlib.util
+import os
 from functools import partial
 from typing import Callable, List, Optional, Sequence, Type
 
@@ -115,6 +116,9 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         hf_token: Optional[str] = None,
         inference_mode: bool = False,
         use_flash_attention_2: bool = False,
+        inference_config: Optional[dict] = None,
+        tokenizer_hub_path: Optional[str] = None,
+        tokenizer_revision: Optional[str] = None,
     ) -> None:
         super().__init__(llm_backbone_id)
         self.llm_family = llm_family
@@ -148,11 +152,16 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
 
         # [Contract] `inference_mode` means we're loading from a pretrained checkpoint; no need to load base weights!
         else:
+            architecture_source = "pinned MemoryVLA architecture" if inference_config is not None else hf_hub_path
             overwatch.info(
-                f"Building empty [bold]{llm_family}[/] LLM from [underline]`{hf_hub_path}`[/]",
+                f"Building empty [bold]{llm_family}[/] LLM from "
+                f"[underline]`{architecture_source}`[/]",
                 ctx_level=1,
             )
-            llm_config = AutoConfig.from_pretrained(hf_hub_path, token=hf_token)
+            if inference_config is not None:
+                llm_config = llm_cls.config_class(**inference_config)
+            else:
+                llm_config = AutoConfig.from_pretrained(hf_hub_path, token=hf_token)
             self.llm = llm_cls._from_config(llm_config, attn_implementation="sdpa")
 
         # Lightweight Handling (with extended explanation) for setting some LLM Parameters
@@ -172,10 +181,13 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
             f"Loading [bold]{llm_family}[/] (Fast) Tokenizer via the AutoTokenizer API",
             ctx_level=1,
         )
+        tokenizer_source = tokenizer_hub_path or hf_hub_path
         self.tokenizer = AutoTokenizer.from_pretrained(
-            hf_hub_path,
+            tokenizer_source,
             model_max_length=self.llm_max_length,
-            token=hf_token,
+            revision=tokenizer_revision,
+            cache_dir=os.environ.get("HF_HOME"),
+            token=hf_token if hf_token is not None else False,
             padding_side="right",
         )
 

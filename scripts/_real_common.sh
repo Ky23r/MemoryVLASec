@@ -14,6 +14,7 @@ cd "${PROJECT_ROOT}"
 
 export HF_HOME="${CACHE_DIR}"
 export HF_HUB_CACHE="${HF_HOME}/hub"
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
 export TFDS_DATA_DIR="${CACHE_DIR}/tfds"
 export LIBERO_CONFIG_PATH
 export MUJOCO_GL="${MUJOCO_GL:-egl}"

@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy
 import torch.nn.functional as F
-from transformers import LlamaTokenizerFast
+from transformers import LlamaTokenizer, LlamaTokenizerFast
 
 from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.vision import VisionBackbone
@@ -741,7 +741,7 @@ class MemoryVLA(nn.Module):
         prompt_text = prompt_builder.get_prompt()
 
         input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(self.vlm.device)
-        if isinstance(tokenizer, LlamaTokenizerFast):
+        if isinstance(tokenizer, (LlamaTokenizer, LlamaTokenizerFast)):
             input_ids = torch.cat(
                 (input_ids, torch.unsqueeze(torch.Tensor([29871, 2]).long(), dim=0).to(self.vlm.device)), dim=1
             )

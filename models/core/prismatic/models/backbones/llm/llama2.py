@@ -24,7 +24,31 @@ from prismatic.models.backbones.llm.prompting import (
 LLAMA2_MODELS = {
     # === Pure Meta LLaMa-2 (non-instruct/chat-tuned) Models ===
     "llama2-7b-pure": {
-        "llm_family": "llama2", "llm_cls": LlamaForCausalLM, "hf_hub_path": "meta-llama/Llama-2-7b-hf"
+        "llm_family": "llama2",
+        "llm_cls": LlamaForCausalLM,
+        "hf_hub_path": "meta-llama/Llama-2-7b-hf",
+        # MemoryVLA's released checkpoint contains every LLM tensor. Construct
+        # the exact Llama-2 7B architecture locally, then load the full state.
+        "inference_config": {
+            "vocab_size": 32000,
+            "hidden_size": 4096,
+            "intermediate_size": 11008,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 32,
+            "hidden_act": "silu",
+            "max_position_embeddings": 4096,
+            "initializer_range": 0.02,
+            "rms_norm_eps": 1e-5,
+            "use_cache": True,
+            "pad_token_id": 0,
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+            "pretraining_tp": 1,
+            "tie_word_embeddings": False,
+        },
+        "tokenizer_hub_path": "hf-internal-testing/llama-tokenizer",
+        "tokenizer_revision": "d02ad6cb9dd2c2296a6332199fa2fdca5938fef0",
     },
 
     "llama2-13b-pure": {

@@ -24,9 +24,9 @@ OFFICIAL_LIBERO = (
     "https://github.com/Lifelong-Robot-Learning/LIBERO.git",
     "8f1084e3132a39270c3a13ebe37270a43ece2a01",
 )
-OFFICIAL_BASE_LLM = (
-    "meta-llama/Llama-2-7b-hf",
-    "01c7f73d771dfac7d292323805ebc428287df4f9",
+OFFICIAL_TOKENIZER = (
+    "hf-internal-testing/llama-tokenizer",
+    "d02ad6cb9dd2c2296a6332199fa2fdca5938fef0",
 )
 OFFICIAL_VISION_MODELS = {
     "timm/vit_large_patch14_reg4_dinov2.lvd142m": "f3c408e77602bb412aa65fb03dfa0d5f95cb3832",
@@ -43,13 +43,13 @@ def _require_official_sources() -> None:
         "MemoryVLA": (os.environ["MODEL_ID"], os.environ["MODEL_REVISION"]),
         "LIBERO RLDS": (os.environ["DATASET_ID"], os.environ["DATASET_REVISION"]),
         "LIBERO code": (os.environ["LIBERO_REPOSITORY"], os.environ["LIBERO_REVISION"]),
-        "MemoryVLA base tokenizer/config": (os.environ["BASE_LLM_ID"], os.environ["BASE_LLM_REVISION"]),
+        "MemoryVLA tokenizer": (os.environ["TOKENIZER_ID"], os.environ["TOKENIZER_REVISION"]),
     }
     expected = {
         "MemoryVLA": OFFICIAL_MODEL,
         "LIBERO RLDS": OFFICIAL_DATASET,
         "LIBERO code": OFFICIAL_LIBERO,
-        "MemoryVLA base tokenizer/config": OFFICIAL_BASE_LLM,
+        "MemoryVLA tokenizer": OFFICIAL_TOKENIZER,
     }
     for label, source in configured.items():
         if source != expected[label]:
@@ -127,39 +127,36 @@ def main() -> None:
         repo_id=os.environ["MODEL_ID"],
         revision=os.environ["MODEL_REVISION"],
         cache_dir=cache,
+        token=False,
         allow_patterns=[
             "config.json", "config.yaml", "dataset_statistics.json",
-            "checkpoints/*.pt", "README.md",
+            os.environ["MODEL_CHECKPOINT_FILE"], "README.md",
         ],
     )
+    model_checkpoint = Path(model_snapshot) / os.environ["MODEL_CHECKPOINT_FILE"]
+    if not model_checkpoint.is_file() or model_checkpoint.stat().st_size == 0:
+        raise FileNotFoundError(
+            f"Official public MemoryVLA checkpoint is missing or empty: {model_checkpoint}"
+        )
     dataset_snapshot = snapshot_download(
         repo_id=os.environ["DATASET_ID"],
         repo_type="dataset",
         revision=os.environ["DATASET_REVISION"],
         cache_dir=cache,
+        token=False,
         allow_patterns=[f"{os.environ['DATASET_CONFIG']}/**", "README.md"],
     )
-    api = HfApi()
-    try:
-        base_info = api.model_info(os.environ["BASE_LLM_ID"], revision="main")
-        if base_info.sha != os.environ["BASE_LLM_REVISION"]:
-            raise RuntimeError(
-                f"Official base LLM main moved to {base_info.sha}; audit and update the pin before running."
-            )
-        base_llm_snapshot = snapshot_download(
-            repo_id=os.environ["BASE_LLM_ID"],
-            revision="main",
-            cache_dir=cache,
-            allow_patterns=[
-                "config.json", "tokenizer.json", "tokenizer.model",
-                "tokenizer_config.json", "special_tokens_map.json",
-            ],
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            "MemoryVLA requires the official gated Meta Llama-2 tokenizer/config. "
-            "Accept its Hugging Face license and run `huggingface-cli login`, then retry."
-        ) from exc
+    api = HfApi(token=False)
+    tokenizer_snapshot = snapshot_download(
+        repo_id=os.environ["TOKENIZER_ID"],
+        revision=os.environ["TOKENIZER_REVISION"],
+        cache_dir=cache,
+        token=False,
+        allow_patterns=[
+            "tokenizer.json", "tokenizer.model", "tokenizer_config.json",
+            "special_tokens_map.json",
+        ],
+    )
     vision_snapshots = {}
     for repo_id, expected_sha in OFFICIAL_VISION_MODELS.items():
         info = api.model_info(repo_id, revision="main")
@@ -172,6 +169,7 @@ def main() -> None:
             repo_id=repo_id,
             revision="main",
             cache_dir=cache,
+            token=False,
             allow_patterns=["config.json", "model.safetensors", "pytorch_model.bin"],
         )
     _prepare_libero()
@@ -179,8 +177,9 @@ def main() -> None:
     print(json.dumps({
         "mode": args.mode,
         "model_snapshot": model_snapshot,
+        "model_checkpoint": str(model_checkpoint),
         "dataset_snapshot": dataset_snapshot,
-        "base_llm_snapshot": base_llm_snapshot,
+        "tokenizer_snapshot": tokenizer_snapshot,
         "vision_snapshots": vision_snapshots,
         "security": status,
     }, indent=2))

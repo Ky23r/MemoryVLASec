@@ -18,6 +18,8 @@ overwatch = initialize_overwatch(__name__)
 
 # === HF Hub Repository ===
 HF_HUB_REPO = "TRI-ML/prismatic-vlms"
+OFFICIAL_MEMORYVLA_ID = "shihao1895/memvla-libero-spatial"
+OFFICIAL_MEMORYVLA_CHECKPOINT = "checkpoints/memvla-libero-spatial.pt"
 
 MEMORY_VLA_CONFIG_KEYS = {
     "action_dim", "future_action_window_size", "action_model_type", "use_ema",
@@ -179,22 +181,28 @@ def load_vla(
         model_id_or_path = str(model_id_or_path)
         overwatch.info(f"Checking HF for `{model_id_or_path}` at revision `{revision}`")
         with overwatch.local_zero_first():
+            patterns = [
+                "config.json", "config.yaml", "dataset_statistics.json", "README.md",
+                OFFICIAL_MEMORYVLA_CHECKPOINT
+                if model_id_or_path == OFFICIAL_MEMORYVLA_ID
+                else "checkpoints/*.pt",
+            ]
             run_dir = Path(snapshot_download(
                 repo_id=model_id_or_path,
                 revision=revision,
-                token=hf_token,
+                token=hf_token if hf_token is not None else False,
                 cache_dir=cache_dir,
-                allow_patterns=[
-                    "config.json",
-                    "config.yaml",
-                    "dataset_statistics.json",
-                    "checkpoints/*.pt",
-                    "README.md",
-                ],
+                allow_patterns=patterns,
             ))
         config_json = run_dir / "config.json"
         dataset_statistics_json = run_dir / "dataset_statistics.json"
         checkpoint_pt = _select_local_checkpoint(run_dir)
+        if model_id_or_path == OFFICIAL_MEMORYVLA_ID:
+            expected_checkpoint = run_dir / OFFICIAL_MEMORYVLA_CHECKPOINT
+            if checkpoint_pt != expected_checkpoint:
+                raise FileNotFoundError(
+                    f"Official MemoryVLA checkpoint was not selected: {expected_checkpoint}"
+                )
         if not config_json.is_file() or not dataset_statistics_json.is_file():
             raise FileNotFoundError(
                 f"Cached MemoryVLA snapshot is missing config/statistics files: {run_dir}"

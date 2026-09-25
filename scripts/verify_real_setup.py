@@ -12,15 +12,17 @@ import torch
 
 
 MODEL_PATTERNS = [
-    "config.json", "config.yaml", "dataset_statistics.json", "checkpoints/*.pt", "README.md"
+    "config.json", "config.yaml", "dataset_statistics.json",
+    "checkpoints/memvla-libero-spatial.pt", "README.md"
 ]
 OFFICIAL_SOURCES = {
     "MODEL_ID": "shihao1895/memvla-libero-spatial",
     "MODEL_REVISION": "4d6572ce289736e459e38a48f8671b557a6fd078",
     "DATASET_ID": "shihao1895/libero-rlds",
     "DATASET_REVISION": "92c18c77d610218e838d8c8d4fc6410f3cbe7b18",
-    "BASE_LLM_ID": "meta-llama/Llama-2-7b-hf",
-    "BASE_LLM_REVISION": "01c7f73d771dfac7d292323805ebc428287df4f9",
+    "MODEL_CHECKPOINT_FILE": "checkpoints/memvla-libero-spatial.pt",
+    "TOKENIZER_ID": "hf-internal-testing/llama-tokenizer",
+    "TOKENIZER_REVISION": "d02ad6cb9dd2c2296a6332199fa2fdca5938fef0",
 }
 OFFICIAL_VISION_MODELS = {
     "timm/vit_large_patch14_reg4_dinov2.lvd142m": "f3c408e77602bb412aa65fb03dfa0d5f95cb3832",
@@ -37,6 +39,7 @@ def _cached_snapshot(repo_id: str, *, repo_type: str | None, revision: str) -> P
             revision=revision,
             cache_dir=os.environ["CACHE_DIR"],
             local_files_only=True,
+            token=False,
             allow_patterns=patterns,
         ))
     except Exception as exc:
@@ -153,23 +156,23 @@ def main() -> None:
         os.environ["DATASET_ID"], repo_type="dataset", revision=os.environ["DATASET_REVISION"]
     )
     try:
-        base_llm_snapshot = Path(snapshot_download(
-            repo_id=os.environ["BASE_LLM_ID"],
-            revision="main",
+        tokenizer_snapshot = Path(snapshot_download(
+            repo_id=os.environ["TOKENIZER_ID"],
+            revision=os.environ["TOKENIZER_REVISION"],
             cache_dir=os.environ["CACHE_DIR"],
             local_files_only=True,
+            token=False,
             allow_patterns=[
-                "config.json", "tokenizer.json", "tokenizer.model",
-                "tokenizer_config.json", "special_tokens_map.json",
+                "tokenizer.json", "tokenizer.model", "tokenizer_config.json",
+                "special_tokens_map.json",
             ],
         ))
     except Exception as exc:
         raise RuntimeError(
-            "Official Meta Llama-2 tokenizer/config is not cached; accept its license, "
-            "run `huggingface-cli login`, then run scripts/download_assets.sh."
+            "Public Llama tokenizer files are not cached; run scripts/download_assets.sh."
         ) from exc
-    if base_llm_snapshot.name != os.environ["BASE_LLM_REVISION"]:
-        raise RuntimeError(f"Cached base LLM revision is not pinned: {base_llm_snapshot}")
+    if tokenizer_snapshot.name != os.environ["TOKENIZER_REVISION"]:
+        raise RuntimeError(f"Cached tokenizer revision is not pinned: {tokenizer_snapshot}")
     vision_snapshots: dict[str, str] = {}
     for repo_id, expected_sha in OFFICIAL_VISION_MODELS.items():
         try:
@@ -178,6 +181,7 @@ def main() -> None:
                 revision="main",
                 cache_dir=os.environ["CACHE_DIR"],
                 local_files_only=True,
+                token=False,
                 allow_patterns=["config.json", "model.safetensors", "pytorch_model.bin"],
             ))
         except Exception as exc:
@@ -191,6 +195,9 @@ def main() -> None:
     for required in ("config.json", "dataset_statistics.json"):
         if not (model_snapshot / required).is_file():
             raise FileNotFoundError(f"MemoryVLA snapshot is incomplete: {model_snapshot / required}")
+    checkpoint = model_snapshot / os.environ["MODEL_CHECKPOINT_FILE"]
+    if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+        raise FileNotFoundError(f"Official MemoryVLA checkpoint is missing or empty: {checkpoint}")
     dataset_dir = dataset_snapshot / os.environ["DATASET_CONFIG"] / "1.0.0"
     if not dataset_dir.is_dir() or not any(dataset_dir.iterdir()):
         raise FileNotFoundError(f"LIBERO RLDS snapshot is incomplete: {dataset_dir}")
@@ -216,8 +223,9 @@ def main() -> None:
         "torch": torch.__version__,
         "cuda_runtime": torch.version.cuda,
         "model_snapshot": str(model_snapshot),
+        "model_checkpoint": str(checkpoint),
         "dataset_snapshot": str(dataset_snapshot),
-        "base_llm_snapshot": str(base_llm_snapshot),
+        "tokenizer_snapshot": str(tokenizer_snapshot),
         "vision_snapshots": vision_snapshots,
     }, indent=2))
 

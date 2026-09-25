@@ -64,7 +64,7 @@ def _prepare_real_libero_assets(args):
                 repo_id=args.dataset_id,
                 repo_type="dataset",
                 revision=args.dataset_revision or "main",
-                token=args.hf_token,
+                token=args.hf_token if args.hf_token is not None else False,
                 cache_dir=args.cache_dir,
                 allow_patterns=[f"{mixture}/**"],
             ))
