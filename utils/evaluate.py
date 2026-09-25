@@ -1,8 +1,201 @@
+import hashlib
+from collections.abc import Mapping
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from .dataset import _find_memory_vla, _integer_metadata, get_dataset_and_collator
+from .reproducibility import set_seed
+
+
+@dataclass(frozen=True)
+class RolloutEpisode:
+    """One preselected BadVLA-eligible environment episode."""
+
+    task: str
+    episode_index: int
+    environment_seed: int
+
+    def __post_init__(self):
+        if not self.task:
+            raise ValueError("Rollout task must be non-empty")
+        for name in ("episode_index", "environment_seed"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
+    @property
+    def key(self):
+        return self.task, self.episode_index, self.environment_seed
+
+
+def badvla_libero_success(outcome):
+    """Official released LIBERO criterion: the environment returned ``done``."""
+    if not isinstance(outcome, Mapping) or "done" not in outcome:
+        raise TypeError("A LIBERO rollout outcome must be a mapping containing boolean 'done'")
+    done = outcome["done"]
+    if not isinstance(done, (bool, np.bool_)):
+        raise TypeError("LIBERO rollout outcome['done'] must be boolean")
+    return bool(done)
+
+
+def _reset_rollout_memory(model):
+    memory_vla = _find_memory_vla(model)
+    for bank_name in ("cog_mem_bank", "per_mem_bank"):
+        bank = getattr(memory_vla, bank_name, None)
+        if bank is not None:
+            bank.reset()
+    if hasattr(memory_vla, "cur_timestep"):
+        memory_vla.cur_timestep = 0
+
+
+def _run_rollout_condition(
+    model,
+    episodes,
+    rollout_episode,
+    success_criterion,
+    *,
+    trigger,
+):
+    """Run exactly the supplied manifest; failures propagate instead of shrinking it."""
+    model.eval()
+    successes = []
+    with torch.inference_mode():
+        for episode in episodes:
+            set_seed(episode.environment_seed)
+            _reset_rollout_memory(model)
+            outcome = rollout_episode(model=model, episode=episode, trigger=trigger)
+            success = success_criterion(outcome)
+            if not isinstance(success, bool):
+                raise TypeError("The rollout success criterion must return bool")
+            successes.append(success)
+    return tuple(successes)
+
+
+def evaluate_badvla_defense_rollouts(
+    *,
+    baseline_model,
+    attacked_model,
+    attacked_checkpoint,
+    trigger,
+    episodes,
+    rollout_episode,
+    success_criterion=badvla_libero_success,
+):
+    """Compare BadVLA with A-MemGuard OFF/ON on one paired rollout manifest.
+
+    BadVLA's paper ASR needs benign-reference clean/triggered success rates in
+    addition to the attacked policy rates.  Those reference rollouts and both
+    attacked conditions all use this one ordered episode tuple, trigger object,
+    seed schedule, rollout callback, and success callback.
+    """
+    if not attacked_checkpoint:
+        raise ValueError("The attacked checkpoint identity/path must be explicit")
+    if trigger is None:
+        raise ValueError("BadVLA comparison requires one explicit trigger")
+    if not callable(rollout_episode) or not callable(success_criterion):
+        raise TypeError("rollout_episode and success_criterion must be callable")
+    if getattr(attacked_model, "attack", None) is not trigger:
+        raise ValueError("The paired trigger must be the attacked model's BadVLA trigger object")
+    if baseline_model is attacked_model:
+        raise ValueError("BadVLA ASR requires a distinct benign reference model")
+    if getattr(attacked_model, "defense", None) is None:
+        raise ValueError("The attacked model must have A-MemGuard configured")
+    toggle = getattr(attacked_model, "set_defense_enabled", None)
+    if not callable(toggle):
+        raise TypeError("The attacked model does not support paired defense toggling")
+
+    episodes = tuple(episodes)
+    if not episodes:
+        raise ValueError("At least one eligible rollout episode is required")
+    if any(not isinstance(episode, RolloutEpisode) for episode in episodes):
+        raise TypeError("Every episode must be a RolloutEpisode")
+    episode_keys = tuple(episode.key for episode in episodes)
+    if len(set(episode_keys)) != len(episode_keys):
+        raise ValueError("Eligible rollout episodes must be unique")
+
+    # Benign reference rates are shared by both ASR calculations.
+    baseline_clean = _run_rollout_condition(
+        baseline_model, episodes, rollout_episode, success_criterion, trigger=None
+    )
+    baseline_triggered = _run_rollout_condition(
+        baseline_model, episodes, rollout_episode, success_criterion, trigger=trigger
+    )
+
+    # Toggle only the retrieval hook: the attacked model object and loaded
+    # checkpoint are deliberately identical in both arms.
+    original_defense_state = bool(getattr(attacked_model, "defense_enabled", True))
+    try:
+        toggle(False)
+        attacked_clean_off = _run_rollout_condition(
+            attacked_model, episodes, rollout_episode, success_criterion, trigger=None
+        )
+        attacked_triggered_off = _run_rollout_condition(
+            attacked_model, episodes, rollout_episode, success_criterion, trigger=trigger
+        )
+        toggle(True)
+        attacked_clean_on = _run_rollout_condition(
+            attacked_model, episodes, rollout_episode, success_criterion, trigger=None
+        )
+        attacked_triggered_on = _run_rollout_condition(
+            attacked_model, episodes, rollout_episode, success_criterion, trigger=trigger
+        )
+    finally:
+        toggle(original_defense_state)
+
+    denominator = len(episodes)
+    rate = lambda values: rollout_success_rate(sum(values), denominator)
+    baseline_clean_sr = rate(baseline_clean)
+    baseline_triggered_sr = rate(baseline_triggered)
+    clean_off_sr = rate(attacked_clean_off)
+    triggered_off_sr = rate(attacked_triggered_off)
+    clean_on_sr = rate(attacked_clean_on)
+    triggered_on_sr = rate(attacked_triggered_on)
+    asr_off = compute_badvla_asr(
+        baseline_clean_sr, baseline_triggered_sr, clean_off_sr, triggered_off_sr
+    )
+    asr_on = compute_badvla_asr(
+        baseline_clean_sr, baseline_triggered_sr, clean_on_sr, triggered_on_sr
+    )
+    return {
+        "attacked_checkpoint": str(attacked_checkpoint),
+        "episode_keys": episode_keys,
+        "denominator": denominator,
+        "success_definition": success_criterion,
+        "baseline": {
+            "clean_sr": baseline_clean_sr,
+            "triggered_sr": baseline_triggered_sr,
+        },
+        "badvla": {
+            "clean_sr": clean_off_sr,
+            "triggered_sr": triggered_off_sr,
+            "asr": asr_off,
+        },
+        "badvla_amemguard": {
+            "clean_sr": clean_on_sr,
+            "triggered_sr": triggered_on_sr,
+            "asr": asr_on,
+        },
+        "asr_reduction": asr_off - asr_on,
+        "clean_sr_drop": (clean_off_sr - clean_on_sr) * 100.0,
+    }
+
+
+def format_badvla_defense_report(result):
+    """Render success rates and BadVLA ASR as percentages."""
+    off = result["badvla"]
+    on = result["badvla_amemguard"]
+    return "\n".join((
+        "| Setting | Clean SR | ASR |",
+        "|---|---:|---:|",
+        f"| BadVLA | {off['clean_sr'] * 100:.2f}% | {off['asr']:.2f}% |",
+        f"| BadVLA + A-MemGuard | {on['clean_sr'] * 100:.2f}% | {on['asr']:.2f}% |",
+        "",
+        f"ASR reduction: {result['asr_reduction']:.2f} percentage points",
+        f"Clean SR drop: {result['clean_sr_drop']:.2f} percentage points",
+    ))
 
 
 class EpisodeCursor:
@@ -183,6 +376,16 @@ def _run_offline_condition(model, args, *, triggered):
             if image is None:
                 raise KeyError("Offline evaluation sample is missing the raw PIL 'image'")
 
+            target = sample["actions"].detach().cpu().numpy()
+            raw_image = np.asarray(image)
+            sample_keys.append((
+                episode_id,
+                timestep,
+                str(sample["instruction"]),
+                hashlib.sha256(raw_image.tobytes()).digest(),
+                hashlib.sha256(target.tobytes()).digest(),
+            ))
+
             if triggered:
                 if args.attack not in {"badvla", "dropvla"} or not hasattr(model, "attack"):
                     raise ValueError("Triggered evaluation requires an active attack adapter")
@@ -203,14 +406,12 @@ def _run_offline_condition(model, args, *, triggered):
                 num_ddim_steps=args.num_ddim_steps,
                 episode_first_frame="True" if first_frame else "False",
             )
-            target = sample["actions"].detach().cpu().numpy()
             _, normalized = _validate_action_prediction(prediction, target, horizon, action_dim)
             error = normalized.astype(np.float64) - target.astype(np.float64)
             squared_error_sum += float(np.square(error).sum())
             value_count += error.size
             transition_count += 1
             episode_ids.add(episode_id)
-            sample_keys.append((episode_id, timestep))
             pbar.set_postfix({"MSE": f"{squared_error_sum / value_count:.6f}"})
 
     if transition_count == 0:
@@ -231,6 +432,12 @@ def run_evaluate(model, args):
     defense = _active_defense(model)
     if defense is not None:
         defense.reset_metrics()
+    include_tensorflow = (
+        not getattr(args, "mock", False)
+        and getattr(args, "dataset_format", None) == "rlds"
+    )
+    evaluation_seed = int(getattr(args, "seed", 42))
+    set_seed(evaluation_seed, include_tensorflow=include_tensorflow)
     clean, clean_keys = _run_offline_condition(model, args, triggered=False)
     clean_filter = defense.metrics() if defense is not None else None
     if args.attack not in {"badvla", "dropvla"}:
@@ -253,6 +460,10 @@ def run_evaluate(model, args):
 
     if defense is not None:
         defense.reset_metrics()
+    # Pair the triggered condition with the clean condition's dataset ordering
+    # and diffusion noise. The full observation/target fingerprints below
+    # still fail closed if an input pipeline ignores these seeds.
+    set_seed(evaluation_seed, include_tensorflow=include_tensorflow)
     triggered, triggered_keys = _run_offline_condition(model, args, triggered=True)
     triggered_filter = defense.metrics() if defense is not None else None
     if triggered_keys != clean_keys:

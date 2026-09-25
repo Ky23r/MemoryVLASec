@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from utils.dataset import MemoryVLASampleTransform, adapt_libero_episode
-from utils.train import _forward_memory_vla, _reset_memory_vla
+from utils.train import _forward_memory_vla, _images_to, _reset_memory_vla, run_train
 
 
 class ExactMemoryVLAMock(nn.Module):
@@ -89,6 +89,20 @@ def make_batch(batch_size=2):
 
 
 class MemoryVLATrainingAPITest(unittest.TestCase):
+    def test_real_repeating_rlds_training_requires_a_step_cap(self):
+        args = SimpleNamespace(max_steps=None, dataset_format="rlds", mock=False)
+        with self.assertRaisesRegex(ValueError, "repeats indefinitely"):
+            run_train(ExactMemoryVLAMock(), args)
+
+    def test_image_batches_are_cast_to_model_dtype_without_casting_integer_tensors(self):
+        images = {
+            "image": torch.zeros(2, 3, 8, 8, dtype=torch.float32),
+            "mask": torch.ones(2, 8, 8, dtype=torch.int64),
+        }
+        moved = _images_to(images, "cpu", torch.bfloat16)
+        self.assertEqual(moved["image"].dtype, torch.bfloat16)
+        self.assertEqual(moved["mask"].dtype, torch.int64)
+
     def test_finite_training_pass_resets_prior_memory(self):
         model = ExactMemoryVLAMock()
         _reset_memory_vla(model)

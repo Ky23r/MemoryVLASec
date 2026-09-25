@@ -11,10 +11,18 @@ import torch.nn as nn
 from PIL import Image
 
 from attacks.badvla import BADVLA_CHECKPOINT_FORMAT, BadVLA
+from defenses.amemguard import AMemGuard
 from main import _load_state_checkpoint
 from models.secure_vla import SecureVLA
 from utils.args import parse_arguments
-from utils.evaluate import compute_badvla_asr, rollout_success_rate
+from utils.evaluate import (
+    RolloutEpisode,
+    badvla_libero_success,
+    compute_badvla_asr,
+    evaluate_badvla_defense_rollouts,
+    format_badvla_defense_report,
+    rollout_success_rate,
+)
 from utils.mock_components import MockBaseMemoryVLA
 from utils.train import (
     _configure_stage1,
@@ -185,6 +193,86 @@ class BadVLAIntegrationTest(unittest.TestCase):
         self.assertAlmostEqual(compute_badvla_asr(0.8, 0.8, 0.8, 0.0), 100.0)
         with self.assertRaisesRegex(ValueError, "undefined"):
             compute_badvla_asr(0.8, 0.0, 0.8, 0.0)
+
+    def test_paired_defense_evaluation_shares_every_rollout_invariant(self):
+        baseline = MockBaseMemoryVLA()
+        attack = BadVLA()
+        attacked = SecureVLA(MockBaseMemoryVLA(), attack=attack, defense=AMemGuard())
+        episodes = tuple(
+            RolloutEpisode("libero_spatial/task_3", index, 1000 + index)
+            for index in range(4)
+        )
+        calls, criterion_outcomes = [], []
+
+        def rollout_episode(*, model, episode, trigger):
+            calls.append((model, episode, trigger, getattr(model, "defense_enabled", False)))
+            if model is baseline:
+                done = True
+            elif not model.defense_enabled and trigger is None:
+                done = episode.episode_index < 3
+            elif not model.defense_enabled:
+                done = episode.episode_index == 0
+            elif trigger is None:
+                done = episode.episode_index < 2
+            else:
+                done = episode.episode_index < 3
+            return {"done": done}
+
+        def one_success_definition(outcome):
+            criterion_outcomes.append(outcome)
+            return badvla_libero_success(outcome)
+
+        result = evaluate_badvla_defense_rollouts(
+            baseline_model=baseline,
+            attacked_model=attacked,
+            attacked_checkpoint="checkpoints/badvla-stage2.pt",
+            trigger=attack,
+            episodes=episodes,
+            rollout_episode=rollout_episode,
+            success_criterion=one_success_definition,
+        )
+
+        self.assertEqual(result["denominator"], 4)
+        self.assertEqual(result["episode_keys"], tuple(e.key for e in episodes))
+        self.assertIs(result["success_definition"], one_success_definition)
+        self.assertEqual(len(criterion_outcomes), 6 * len(episodes))
+        for offset in range(0, len(calls), len(episodes)):
+            self.assertEqual(
+                [call[1] for call in calls[offset:offset + len(episodes)]], list(episodes)
+            )
+        attacked_calls = [call for call in calls if call[0] is attacked]
+        self.assertEqual({id(call[0]) for call in attacked_calls}, {id(attacked)})
+        self.assertTrue(all(call[2] is attack for call in attacked_calls if call[2] is not None))
+        self.assertEqual(result["attacked_checkpoint"], "checkpoints/badvla-stage2.pt")
+        self.assertAlmostEqual(result["badvla"]["clean_sr"], 0.75)
+        self.assertAlmostEqual(result["badvla"]["asr"], 56.25)
+        self.assertAlmostEqual(result["badvla_amemguard"]["clean_sr"], 0.5)
+        self.assertAlmostEqual(result["badvla_amemguard"]["asr"], 12.5)
+        self.assertAlmostEqual(result["asr_reduction"], 43.75)
+        self.assertAlmostEqual(result["clean_sr_drop"], 25.0)
+        self.assertTrue(attacked.defense_enabled)
+        self.assertIn("| BadVLA | 75.00% | 56.25% |", format_badvla_defense_report(result))
+
+    def test_paired_rollout_does_not_silently_drop_failed_episode(self):
+        baseline = MockBaseMemoryVLA()
+        attack = BadVLA()
+        attacked = SecureVLA(MockBaseMemoryVLA(), attack=attack, defense=AMemGuard())
+        episodes = (RolloutEpisode("task", 0, 1), RolloutEpisode("task", 1, 2))
+
+        def rollout_episode(*, model, episode, trigger):
+            if episode.episode_index == 1:
+                raise RuntimeError("environment failed")
+            return {"done": True}
+
+        with self.assertRaisesRegex(RuntimeError, "environment failed"):
+            evaluate_badvla_defense_rollouts(
+                baseline_model=baseline,
+                attacked_model=attacked,
+                attacked_checkpoint="stage2.pt",
+                trigger=attack,
+                episodes=episodes,
+                rollout_episode=rollout_episode,
+            )
 
 
 if __name__ == "__main__":

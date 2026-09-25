@@ -13,10 +13,14 @@ import torch.nn as nn
 from PIL import Image
 
 from main import _build_model, _load_state_checkpoint, _validate_dataset_source, main
+from defenses.amemguard import AMemGuard
+from models.secure_vla import SecureVLA
 from models.core.vla.load import _checkpoint_model_kwargs, _select_local_checkpoint
 from utils.args import parse_arguments
 from utils.dataset import _resolve_rlds_root
 from utils.evaluate import run_evaluate
+from utils.mock_components import MockBaseMemoryVLA
+from utils.train import MEMORYVLA_CHECKPOINT_FORMAT, _save_memoryvla_checkpoint
 
 
 STATS = {
@@ -54,6 +58,18 @@ class TinyMemoryVLA(nn.Module):
         return np.ones(shape, np.float32), np.zeros(shape, np.float32)
 
 
+class StochasticTinyMemoryVLA(TinyMemoryVLA):
+    def __init__(self):
+        super().__init__()
+        self.attack = SimpleNamespace(apply_trigger=lambda image: image)
+
+    def predict_action(self, image, instruction, **kwargs):
+        del image, instruction
+        self.calls.append(kwargs)
+        normalized = torch.randn(2, 7).numpy()
+        return normalized.copy(), normalized
+
+
 class TinyDataset:
     dataset_statistics = STATS
 
@@ -84,6 +100,31 @@ def eval_args():
 
 
 class BaselineIntegrationTest(unittest.TestCase):
+    def test_baseline_checkpoint_loads_through_defense_wrapper(self):
+        baseline = MockBaseMemoryVLA()
+        defended = SecureVLA(MockBaseMemoryVLA(), defense=AMemGuard())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.pt"
+            torch.save(baseline.state_dict(), path)
+            with self.assertWarnsRegex(UserWarning, "legacy raw baseline"):
+                _load_state_checkpoint(defended, path)
+        for expected, actual in zip(baseline.parameters(), defended.base_model.parameters()):
+            torch.testing.assert_close(expected, actual)
+
+    def test_tagged_baseline_checkpoint_checks_architecture_and_loads_through_defense(self):
+        baseline = MockBaseMemoryVLA()
+        defended = SecureVLA(MockBaseMemoryVLA(), defense=AMemGuard())
+        with tempfile.TemporaryDirectory() as directory:
+            path = _save_memoryvla_checkpoint(baseline, directory)
+            payload = torch.load(path, map_location="cpu", weights_only=True)
+            self.assertEqual(payload["format"], MEMORYVLA_CHECKPOINT_FORMAT)
+            _load_state_checkpoint(defended, path)
+
+            payload["model_config"]["future_action_window_size"] = 99
+            torch.save(payload, path)
+            with self.assertRaisesRegex(ValueError, "model_config"):
+                _load_state_checkpoint(defended, path)
+
     def test_checkpoint_architecture_config_is_authoritative(self):
         config = {"action_dim": 7, "future_action_window_size": 15, "group_size": 16}
         self.assertEqual(_checkpoint_model_kwargs(config, {})["group_size"], 16)
@@ -138,8 +179,12 @@ class BaselineIntegrationTest(unittest.TestCase):
             _validate_dataset_source(args)
 
     def test_unavailable_rollout_mode_fails_clearly(self):
-        with self.assertRaisesRegex(RuntimeError, "rollout evaluation is not implemented"):
+        with self.assertRaisesRegex(RuntimeError, "ASR cannot yet be measured"):
             main(["--mode", "evaluate", "--evaluation_type", "libero", "--mock", "--device", "cpu"])
+
+    def test_verify_mode_rejects_ignored_security_options(self):
+        with self.assertRaisesRegex(ValueError, "baseline infrastructure check"):
+            main(["--mode", "verify", "--attack", "badvla"])
 
     def test_local_manifest_format_requires_local_path(self):
         args = SimpleNamespace(mock=False, dataset_id="repo/data", dataset_path="", dataset_format="trajectory")
@@ -170,11 +215,13 @@ class BaselineIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = f"{directory}/weights.pt"
             torch.save(source.state_dict(), path)
-            _load_state_checkpoint(target, path)
+            with self.assertWarnsRegex(UserWarning, "legacy raw baseline"):
+                _load_state_checkpoint(target, path)
             torch.testing.assert_close(target.weight, source.weight)
             torch.save({"wrong.weight": torch.zeros(2, 2)}, path)
-            with self.assertRaises(RuntimeError):
-                _load_state_checkpoint(target, path)
+            with self.assertWarnsRegex(UserWarning, "legacy raw baseline"):
+                with self.assertRaises(RuntimeError):
+                    _load_state_checkpoint(target, path)
 
     def test_offline_evaluator_reports_mse_not_success(self):
         model, dataset = TinyMemoryVLA(), TinyDataset()
@@ -188,6 +235,17 @@ class BaselineIntegrationTest(unittest.TestCase):
             ["True", "False", "False", "True", "False"],
         )
         self.assertNotIn("success_rate", result)
+
+    def test_clean_and_triggered_offline_conditions_reuse_diffusion_rng(self):
+        model, dataset = StochasticTinyMemoryVLA(), TinyDataset()
+        args = eval_args()
+        args.attack = "badvla"
+        with mock.patch("utils.evaluate.get_dataset_and_collator", return_value=(dataset, None)):
+            result = run_evaluate(model, args)
+        self.assertEqual(
+            result["clean"]["mean_normalized_action_mse"],
+            result["triggered"]["mean_normalized_action_mse"],
+        )
 
     def test_offline_evaluator_does_not_hide_inference_failure(self):
         model, dataset = TinyMemoryVLA(fail=True), TinyDataset()

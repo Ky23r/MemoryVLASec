@@ -503,10 +503,13 @@ def get_dataloader(args, model, *, train=True):
     batch_size = (group_size if loader_type == "group" else 1) if batch_size is None else batch_size
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    memory_vla.dataloader_type = loader_type
+    memory_vla.group_size = group_size
     for bank_name in ("cog_mem_bank", "per_mem_bank"):
         bank = getattr(memory_vla, bank_name, None)
         if bank is not None:
             bank.dataloader_type = loader_type
+            bank.group_size = group_size
 
     is_iterable = isinstance(dataset, IterableDataset)
     if is_iterable:

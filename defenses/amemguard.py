@@ -53,6 +53,7 @@ class AMemGuard(BaseDefense):
     def reset_metrics(self):
         """Reset reporting counters; this does not affect filtering decisions."""
         self._metrics = defaultdict(lambda: Counter(calls=0, candidates=0, accepted=0, rejected=0))
+        self.last_decisions.clear()
 
     def metrics(self) -> dict[str, dict[str, float | int | None]]:
         result = {}

@@ -20,16 +20,22 @@ class SecureVLA(nn.Module):
         self.base_model = base_model
         self.attack = attack
         self.defense = defense
+        self._defense_enabled = False
         if self.defense is not None:
-            self._inject_defense()
+            self.set_defense_enabled(True)
 
     def forward(self, *args, **kwargs):
         # Trigger insertion remains explicit in training/evaluation. This
         # proxy does not alter the clean MemoryVLA call contract.
         return self.base_model(*args, **kwargs)
 
-    def _inject_defense(self):
-        """Attach to both real MemoryVLA histories before retrieval attention."""
+    def set_defense_enabled(self, enabled):
+        """Toggle one defense on the same model/checkpoint for paired rollouts."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        if enabled and self.defense is None:
+            raise ValueError("Cannot enable a defense that is not configured")
+
         memory_vla = getattr(self.base_model, "model", None)
         if memory_vla is None:
             raise TypeError("Defense requires BaseMemoryVLA.model")
@@ -44,4 +50,12 @@ class SecureVLA(nn.Module):
                     f"MemoryVLA {bank_name} bank does not expose the required pre-attention "
                     "set_retrieval_filter hook"
                 )
-            bank.set_retrieval_filter(partial(self.defense.filter_history, bank_name=bank_name))
+            retrieval_filter = (
+                partial(self.defense.filter_history, bank_name=bank_name) if enabled else None
+            )
+            bank.set_retrieval_filter(retrieval_filter)
+        self._defense_enabled = enabled
+
+    @property
+    def defense_enabled(self):
+        return self._defense_enabled

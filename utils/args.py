@@ -117,8 +117,9 @@ def parse_arguments(argv=None):
         type=str,
         default="",
         help=(
-            "Strict project checkpoint. Baseline uses a raw state_dict; BadVLA uses a stage-tagged "
-            "envelope. Optimizer resume is unsupported."
+            "Strict project checkpoint with architecture metadata; BadVLA checkpoints are also "
+            "stage-tagged. Legacy raw baseline state_dicts load with a warning. Optimizer resume "
+            "is unsupported."
         ),
     )
 
@@ -142,14 +143,27 @@ def parse_arguments(argv=None):
         parser.add_argument(
             "--learning_rate",
             type=float,
-            default=1e-5,
-            help="Learning rate for fine-tuning",
+            default=1e-5 if security_args.attack == "badvla" else 2e-5,
+            help="Learning rate for fine-tuning (MemoryVLA default: 2e-5; BadVLA adapter: 1e-5)",
         )
+        parser.add_argument(
+            "--max_steps",
+            type=int,
+            default=None,
+            help="Optimization steps per stage; required for the indefinitely repeating real RLDS train loader.",
+        )
+        if security_args.attack == "none":
+            parser.add_argument(
+                "--max_grad_norm",
+                type=float,
+                default=1.0,
+                help="Standard MemoryVLA gradient clipping norm (paper default: 1.0).",
+            )
     parser.add_argument(
         "--dtype",
         choices=["bfloat16", "float32"],
         default=None,
-        help="Model dtype (default: float32 training/CPU, bfloat16 CUDA inference).",
+        help="Model dtype (default: bfloat16 on CUDA, float32 on CPU).",
     )
     if security_args.mode == "evaluate":
         parser.add_argument(
@@ -165,7 +179,10 @@ def parse_arguments(argv=None):
             "--evaluation_type",
             choices=["offline", "libero", "simplerenv"],
             default="offline",
-            help="Only offline validation is implemented in this repository.",
+            help=(
+                "Offline validation is implemented; real rollout modes fail explicitly "
+                "and never substitute MSE/filter rates for ASR."
+            ),
         )
 
     # Attack configuration
@@ -205,6 +222,12 @@ def parse_arguments(argv=None):
                 choices=["both", "stage1", "stage2"],
                 default="both",
                 help="Run both ordered BadVLA stages, Stage I only, or Stage II from --checkpoint.",
+            )
+            parser.add_argument(
+                "--badvla_lr_decay_step",
+                type=int,
+                default=100000,
+                help="Per-stage step at which BadVLA decays the learning rate by 10x.",
             )
     if security_args.attack == "dropvla" and security_args.mode != "verify":
         parser.add_argument("--dropvla_modality", choices=["vision", "text", "joint"], default="vision")

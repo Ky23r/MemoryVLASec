@@ -172,6 +172,13 @@ class LiberoTrajectoryAdapterTest(unittest.TestCase):
         self.assertEqual(loader.batch_size, model.group_size)
         self.assertEqual(model.cog_mem_bank.dataloader_type, "group")
 
+        override_args = Namespace(dataloader_type="group", batch_size=6, group_size=3)
+        with patch("utils.dataset.get_dataset_and_collator", return_value=(EmptyIterableDataset(), list)):
+            get_dataloader(override_args, model)
+        self.assertEqual(model.group_size, 3)
+        self.assertEqual(model.cog_mem_bank.group_size, 3)
+        self.assertEqual(model.per_mem_bank.group_size, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

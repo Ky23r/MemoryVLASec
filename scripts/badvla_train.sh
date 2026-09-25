@@ -13,10 +13,12 @@ REVISION="main"
 DATASET_ID="shihao1895/libero-rlds"
 OUTPUT_DIR="./checkpoints"
 DEVICE="cuda"
-EPOCHS=3
+EPOCHS=1 # RLDS repeats internally; MAX_STEPS is the effective training length.
+MAX_STEPS=200000 # Per stage, matching the released BadVLA script default.
 LEARNING_RATE=1e-5
 TRIGGER_SIZE=0.10
 BADVLA_LOSS_P=0.5
+BADVLA_LR_DECAY_STEP=100000
 SEED=42
 
 python main.py \
@@ -30,8 +32,10 @@ python main.py \
     --attack_stage both \
     --trigger_size "${TRIGGER_SIZE}" \
     --badvla_loss_p "${BADVLA_LOSS_P}" \
+    --badvla_lr_decay_step "${BADVLA_LR_DECAY_STEP}" \
     --defense none \
     --device "${DEVICE}" \
     --epochs "${EPOCHS}" \
+    --max_steps "${MAX_STEPS}" \
     --learning_rate "${LEARNING_RATE}" \
     --seed "${SEED}"

@@ -1,17 +1,13 @@
 import json
 from pathlib import Path
+import warnings
 
 import torch
 
 from utils.args import parse_arguments
 from utils.evaluate import run_evaluate
-from utils.train import run_train
-
-
-def set_seed(seed):
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+from utils.reproducibility import set_seed
+from utils.train import MEMORYVLA_CHECKPOINT_FORMAT, memoryvla_model_metadata, run_train
 
 
 def _validate_dataset_source(args):
@@ -43,29 +39,70 @@ def _load_state_checkpoint(model, checkpoint_path, device="cpu", expected_attack
         raise TypeError(f"Checkpoint must be a non-empty state_dict mapping: {path}")
     if "model_state_dict" in payload:
         from attacks.badvla import BADVLA_CHECKPOINT_FORMAT
-        from utils.train import badvla_model_metadata
 
-        if payload.get("format") != BADVLA_CHECKPOINT_FORMAT or payload.get("attack") != "badvla":
-            raise ValueError(f"Unsupported attack checkpoint metadata: {path}")
-        if expected_attack_stage is not None and payload.get("stage") != expected_attack_stage:
+        checkpoint_format = payload.get("format")
+        if checkpoint_format == BADVLA_CHECKPOINT_FORMAT:
+            if payload.get("attack") != "badvla":
+                raise ValueError(f"Invalid BadVLA checkpoint metadata: {path}")
+            if expected_attack_stage is not None and payload.get("stage") != expected_attack_stage:
+                raise ValueError(
+                    f"Expected a BadVLA {expected_attack_stage} checkpoint, got "
+                    f"{payload.get('stage')!r}: {path}"
+                )
+            attack = getattr(model, "attack", None)
+            expected_attack_config = {
+                "trigger_size": float(getattr(attack, "trigger_size", float("nan"))),
+                "loss_p": float(getattr(attack, "loss_p", float("nan"))),
+            }
+            if payload.get("attack_config") != expected_attack_config:
+                raise ValueError(
+                    "BadVLA checkpoint attack_config does not match the requested trigger/objective: "
+                    f"checkpoint={payload.get('attack_config')!r}, requested={expected_attack_config!r}"
+                )
+            load_target = model
+        elif checkpoint_format == MEMORYVLA_CHECKPOINT_FORMAT:
+            if payload.get("attack") != "none":
+                raise ValueError(f"Invalid baseline checkpoint metadata: {path}")
+            if expected_attack_stage is not None:
+                raise ValueError(f"BadVLA requires a stage-tagged checkpoint, got baseline: {path}")
+            load_target = getattr(model, "base_model", model)
+        else:
+            raise ValueError(f"Unsupported project checkpoint format {checkpoint_format!r}: {path}")
+
+        checkpoint_model_config = payload.get("model_config")
+        if not isinstance(checkpoint_model_config, dict):
+            raise TypeError(f"Checkpoint model_config must be a mapping: {path}")
+        # These two fields control training lifecycle but not tensor shapes.
+        # Project checkpoints are authoritative so evaluation and Stage II can
+        # faithfully inherit an explicit Stage I loader override.
+        from utils.dataset import _find_memory_vla
+
+        memory_vla = _find_memory_vla(model)
+        checkpoint_loader = checkpoint_model_config.get("dataloader_type")
+        checkpoint_group = checkpoint_model_config.get("group_size")
+        if checkpoint_loader not in {"group", "stream"}:
+            raise ValueError(f"Invalid checkpoint dataloader_type: {checkpoint_loader!r}")
+        invalid_group = (
+            isinstance(checkpoint_group, bool)
+            or not isinstance(checkpoint_group, int)
+            or checkpoint_group <= 0
+            or (checkpoint_loader == "group" and checkpoint_group <= 1)
+        )
+        if invalid_group:
+            raise ValueError(f"Invalid checkpoint group_size: {checkpoint_group!r}")
+        memory_vla.dataloader_type = checkpoint_loader
+        memory_vla.group_size = checkpoint_group
+        for bank_name in ("cog_mem_bank", "per_mem_bank"):
+            bank = getattr(memory_vla, bank_name, None)
+            if bank is not None:
+                bank.dataloader_type = checkpoint_loader
+                bank.group_size = checkpoint_group
+
+        expected_model_config = memoryvla_model_metadata(model)
+        if checkpoint_model_config != expected_model_config:
             raise ValueError(
-                f"Expected a BadVLA {expected_attack_stage} checkpoint, got {payload.get('stage')!r}: {path}"
-            )
-        attack = getattr(model, "attack", None)
-        expected_attack_config = {
-            "trigger_size": float(getattr(attack, "trigger_size", float("nan"))),
-            "loss_p": float(getattr(attack, "loss_p", float("nan"))),
-        }
-        if payload.get("attack_config") != expected_attack_config:
-            raise ValueError(
-                "BadVLA checkpoint attack_config does not match the requested trigger/objective: "
-                f"checkpoint={payload.get('attack_config')!r}, requested={expected_attack_config!r}"
-            )
-        expected_model_config = badvla_model_metadata(model)
-        if payload.get("model_config") != expected_model_config:
-            raise ValueError(
-                "BadVLA checkpoint model_config is incompatible with the loaded MemoryVLA: "
-                f"checkpoint={payload.get('model_config')!r}, loaded={expected_model_config!r}"
+                "Checkpoint model_config is incompatible with the loaded MemoryVLA: "
+                f"checkpoint={checkpoint_model_config!r}, loaded={expected_model_config!r}"
             )
         state_dict = payload["model_state_dict"]
     else:
@@ -74,9 +111,19 @@ def _load_state_checkpoint(model, checkpoint_path, device="cpu", expected_attack
                 f"BadVLA requires a stage-tagged checkpoint; legacy raw state_dict is ambiguous: {path}"
             )
         state_dict = payload
+        # Standard training saves BaseMemoryVLA directly. A defense-only run
+        # wraps that same model in SecureVLA, so load the baseline state into
+        # the exact module that originally produced it.
+        warnings.warn(
+            "Loading a legacy raw baseline state_dict without architecture metadata; "
+            "re-save it with this version to make configuration checks fail closed.",
+            UserWarning,
+            stacklevel=2,
+        )
+        load_target = getattr(model, "base_model", model)
     if not isinstance(state_dict, dict) or not state_dict:
         raise TypeError(f"Checkpoint model_state_dict must be a non-empty mapping: {path}")
-    model.load_state_dict(state_dict, strict=True)
+    load_target.load_state_dict(state_dict, strict=True)
     statistics_path = path.parent / "dataset_statistics.json"
     if statistics_path.is_file():
         from utils.dataset import _find_memory_vla
@@ -98,11 +145,9 @@ def _build_model(args, device):
         print(f"Initializing upstream MemoryVLA from {args.model_id} on {device}...")
         from models.base_memory_vla import BaseMemoryVLA
 
-        dtype_name = args.dtype or (
-            "bfloat16" if args.mode == "evaluate" and device.type == "cuda" else "float32"
-        )
+        dtype_name = args.dtype or ("bfloat16" if device.type == "cuda" else "float32")
         if dtype_name == "bfloat16" and device.type != "cuda":
-            raise ValueError("MemoryVLA bfloat16 predict_action requires CUDA; use --dtype float32 on CPU")
+            raise ValueError("MemoryVLA bfloat16 execution requires CUDA; use --dtype float32 on CPU")
         base_model = BaseMemoryVLA(
             model_id_or_path=args.model_id,
             revision=args.revision,
@@ -169,14 +214,34 @@ def _build_model(args, device):
 
 def main(argv=None):
     args = parse_arguments(argv)
-    set_seed(args.seed)
+    set_seed(
+        args.seed,
+        include_tensorflow=(
+            not args.mock and args.mode != "verify" and args.dataset_format == "rlds"
+        ),
+    )
 
     if args.mode == "train" and args.defense != "none":
         raise ValueError(
             "A-MemGuard is an inference-time memory filter and has no detector-training path"
         )
+    if (
+        args.mode == "train"
+        and args.dataset_format == "rlds"
+        and not args.mock
+        and args.max_steps is None
+    ):
+        raise ValueError(
+            "Real MemoryVLA RLDS training repeats indefinitely; provide --max_steps "
+            "before loading the model."
+        )
 
     if args.mode == "verify":
+        if args.attack != "none" or args.defense != "none" or args.checkpoint:
+            raise ValueError(
+                "--mode verify is a baseline infrastructure check and does not consume "
+                "--attack, --defense, or --checkpoint"
+            )
         print("Running baseline lightweight verification tests...")
         from tests.test_verify import run_cpu_tests
 
@@ -187,8 +252,9 @@ def main(argv=None):
     device = _resolve_device(args.device)
     if args.mode == "evaluate" and args.evaluation_type != "offline":
         raise RuntimeError(
-            f"{args.evaluation_type} rollout evaluation is not implemented in this repository; "
-            "install and run the corresponding upstream environment evaluator instead"
+            "BadVLA ASR cannot yet be measured: this repository has no real "
+            f"{args.evaluation_type} rollout backend. Offline action MSE and memory "
+            "rejection rates are not ASR proxies."
         )
     model = _build_model(args, device)
 

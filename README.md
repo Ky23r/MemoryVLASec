@@ -8,6 +8,13 @@ A standalone, execution-focused framework for evaluating backdoor attacks (`BadV
 pip install -e .
 ```
 
+For real CUDA training, install the upstream FlashAttention dependency (Linux
+with a compatible CUDA toolchain):
+
+```bash
+pip install -e ".[gpu]"
+```
+
 The project does not install or use PEFT, LoRA, bitsandbytes, or quantization.
 
 Python 3.10 is the upstream-tested version (Python 3.11 is also accepted by
@@ -85,6 +92,25 @@ task-level defense, and ASR still requires real environment rollouts. BadVLA
 also attacks the current visual path directly; the memory filter can only
 affect reuse of earlier stored features, not the current triggered frame.
 
+For real rollout integration, `utils.evaluate.evaluate_badvla_defense_rollouts`
+is the single paired evaluation entry point. Give it one ordered tuple of
+preselected `RolloutEpisode` objects and one environment callback. It runs the
+benign-reference clean/triggered conditions required by the BadVLA paper, then
+runs the same attacked model object with A-MemGuard OFF and ON. Every condition
+reuses the same task/episode/seed manifest, trigger object, rollout callback,
+and `done`-based success criterion; an exception aborts the comparison instead
+of silently changing the denominator. `format_badvla_defense_report` emits:
+
+| Setting | Clean SR | ASR |
+|---|---:|---:|
+| BadVLA | ... | ... |
+| BadVLA + A-MemGuard | ... | ... |
+
+followed by ASR reduction and clean-SR drop in percentage points. This
+repository still does not bundle LIBERO or SimplerEnv, so selecting either
+rollout mode fails explicitly with “ASR cannot yet be measured”; offline MSE
+and memory-rejection statistics are never substituted for ASR.
+
 ## CLI Arguments Reference
 
 ### General / Paths
@@ -97,26 +123,30 @@ affect reuse of earlier stored features, not the current triggered frame.
 *   `--dataset_revision`: Optional dataset version.
 *   `--dataset_path`: Local dataset source; mutually exclusive with `--dataset_id`.
 *   `--cache_dir`: Optional Hugging Face cache directory.
-*   `--checkpoint`: Exact baseline state dict produced by this project; loaded strictly. This is weights-only loading, not optimizer/scheduler resume.
+*   `--checkpoint`: Exact project weights with architecture metadata, loaded strictly. Legacy raw baseline state dicts load with an explicit warning because their non-parameter configuration cannot be verified. This is not optimizer/scheduler resume.
 *   `--output_dir` (training only): Directory where checkpoints are saved. BadVLA writes `badvla_stage1.pt` and `badvla_stage2.pt`.
 
 ### Training / Evaluation / Hardware
 *   `--device`: Compute device (default: `cuda`).
 *   `--batch_size`: Training batch size. By default, grouped loading uses one complete checkpoint-defined group and stream loading uses one transition.
 *   `--epochs`: Number of epochs for training (default: `1`).
-*   `--learning_rate`: Fine-tuning learning rate (default: `1e-5`).
+*   `--max_steps`: Optimization-step cap per stage. It is required for real RLDS training because the upstream train dataset repeats indefinitely (MemoryVLA LIBERO uses 20,000; released BadVLA defaults to 200,000 per stage).
+*   `--learning_rate`: Fine-tuning learning rate (MemoryVLA default: `2e-5`; no-LoRA BadVLA adapter default: `1e-5`).
+*   `--max_grad_norm`: Standard MemoryVLA gradient clipping norm (default: `1.0`; baseline training only).
 *   `--seed`: Random seed for reproducibility (default: `42`).
-*   `--dtype`: `float32` or `bfloat16` (defaults to FP32 for training/CPU and BF16 for CUDA inference).
+*   `--dtype`: `float32` or `bfloat16` (defaults to BF16 on CUDA and FP32 on CPU).
 *   `--unnorm_key` (evaluation only): Checkpoint dataset-statistics key when a checkpoint contains more than one dataset.
 
 ### Attack (BadVLA)
 *   `--attack`: Set to `badvla` to enable the backdoor, or `none`.
 *   `--trigger_size`: White center-square side ratio (default: `0.10`, approximately 1% image area).
 *   `--badvla_loss_p`: Stage I clean/reference consistency weight (default: `0.5`).
+*   `--badvla_lr_decay_step`: Per-stage step for the released 10x learning-rate decay (default: `100000`; training only).
 *   `--attack_stage`: `both`, `stage1`, or `stage2`; Stage II-only requires a Stage I `--checkpoint`.
 
-BadVLA v2 checkpoints are strict state dictionaries tagged with their stage,
-trigger size, Stage I loss weight, and MemoryVLA architecture. Evaluation and
+Baseline v1 and BadVLA v2 checkpoints are strict state dictionaries tagged
+with MemoryVLA architecture metadata. BadVLA additionally records its stage,
+trigger size, and Stage I loss weight. Evaluation and
 Stage II-only training must pass the same `--trigger_size` and
 `--badvla_loss_p` used to create the checkpoint.
 
