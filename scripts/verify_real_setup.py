@@ -1,4 +1,4 @@
-"""Fail-closed verification for the cached DGX A100 execution stack."""
+"""Fail-closed verification for the cached MemoryVLASec execution stack."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _verify_attack_checkpoint() -> None:
     path = Path(os.environ["ATTACK_CHECKPOINT"])
     if not path.is_file():
         raise FileNotFoundError(
-            f"BadVLA attack checkpoint is missing: {path}. Run: sbatch slurm/badvla_train.slurm"
+            f"BadVLA attack checkpoint is missing: {path}. Run: bash scripts/badvla_train.sh"
         )
     payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     if payload.get("format") != BADVLA_CHECKPOINT_FORMAT or payload.get("stage") != "stage2":
@@ -71,7 +71,7 @@ def _verify_defense_checkpoint() -> None:
     path = Path(os.environ["DEFENSE_CHECKPOINT"])
     if not path.is_file():
         raise FileNotFoundError(
-            f"A-MemGuard artifact is missing: {path}. Run: sbatch slurm/amemguard_calibrate.slurm"
+            f"A-MemGuard artifact is missing: {path}. Run: bash scripts/calibrate_amemguard.sh"
         )
     attack = Path(os.environ["ATTACK_CHECKPOINT"])
     if not attack.is_file():
@@ -124,6 +124,39 @@ def _security_status(mode: str, require: bool) -> dict[str, str]:
     return status
 
 
+def _selected_device() -> tuple[torch.device, str | None]:
+    value = os.environ.get("DEVICE", "cuda").strip().lower()
+    if value.isdigit():
+        value = f"cuda:{value}"
+    try:
+        device = torch.device(value)
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid DEVICE {value!r}; use cpu, cuda, cuda:<index>, or <index>"
+        ) from exc
+
+    require_a100 = os.environ.get("MEMORYVLASEC_REQUIRE_A100", "0") == "1"
+    required_cuda = os.environ.get("MEMORYVLASEC_REQUIRED_CUDA_VERSION", "")
+    if device.type != "cuda":
+        if require_a100 or required_cuda:
+            raise RuntimeError("A CUDA device is required by the selected environment checks")
+        return device, None
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"DEVICE={value} requested CUDA, but torch.cuda.is_available() is false")
+    if device.index is not None and device.index >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"DEVICE={value} is unavailable; found {torch.cuda.device_count()} CUDA device(s)"
+        )
+    if required_cuda and torch.version.cuda != required_cuda:
+        raise RuntimeError(
+            f"Expected PyTorch CUDA {required_cuda} build, got {torch.version.cuda!r}"
+        )
+    gpu_name = torch.cuda.get_device_name(device)
+    if require_a100 and "A100" not in gpu_name.upper():
+        raise RuntimeError(f"Expected an NVIDIA A100, got {gpu_name!r}")
+    return device, gpu_name
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["baseline", "attack", "defense", "all"], nargs="?", default="all")
@@ -131,7 +164,7 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true",
         help=(
-            "Verify the pinned real assets, CUDA/A100 runtime, LIBERO environment, and requested "
+            "Verify pinned real assets, the selected device, LIBERO, and requested "
             "security artifacts without constructing the full MemoryVLA model."
         ),
     )
@@ -148,13 +181,7 @@ def main() -> None:
                 f"got {os.environ.get(variable)!r}"
             )
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("torch.cuda.is_available() is false; real mode will not fall back to CPU/mock")
-    if torch.version.cuda != "12.6":
-        raise RuntimeError(f"Expected PyTorch CUDA 12.6 build, got {torch.version.cuda!r}")
-    gpu_name = torch.cuda.get_device_name(0)
-    if "A100" not in gpu_name.upper():
-        raise RuntimeError(f"Expected an NVIDIA A100, got {gpu_name!r}")
+    device, gpu_name = _selected_device()
 
     model_snapshot = _cached_snapshot(
         os.environ["MODEL_ID"], repo_type=None, revision=os.environ["MODEL_REVISION"]
@@ -217,15 +244,18 @@ def main() -> None:
 
         loaded = BaseMemoryVLA(
             os.environ["MODEL_ID"], revision=os.environ["MODEL_REVISION"],
-            cache_dir=os.environ["CACHE_DIR"], dtype="bfloat16",
-        ).to("cuda")
+            cache_dir=os.environ["CACHE_DIR"],
+            dtype="bfloat16" if device.type == "cuda" else "float32",
+        ).to(device)
         del loaded
-        torch.cuda.empty_cache()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     print(json.dumps({
         "status": "ready" if all(value == "ready" for value in security.values()) else "base_ready",
         "mode": args.mode,
         "security": security,
+        "device": str(device),
         "gpu": gpu_name,
         "torch": torch.__version__,
         "cuda_runtime": torch.version.cuda,

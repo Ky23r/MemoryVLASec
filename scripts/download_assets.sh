@@ -18,4 +18,4 @@ echo "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}"
 echo "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}"
 echo "Hugging Face cache (preserved across retries): ${CACHE_DIR}"
 
-python "${SCRIPT_DIR}/download_assets.py" "${1:-all}"
+"${PYTHON_BIN}" "${SCRIPT_DIR}/download_assets.py" "${1:-all}"

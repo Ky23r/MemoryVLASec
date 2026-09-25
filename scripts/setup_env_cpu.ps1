@@ -65,8 +65,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to install the pinned packaging tools."
 }
 
-# This is deliberately the CPU wheel index. The Linux DGX setup remains
-# separate and continues to use setup_env.sh with CUDA 12.6.
+# This is deliberately the CPU wheel index. The Linux setup independently
+# selects its wheel index through PYTORCH_INDEX_URL in setup_env.sh.
 & $Python -m pip install `
     "torch==2.7.1" "torchvision==0.22.1" `
     --index-url https://download.pytorch.org/whl/cpu

@@ -175,7 +175,7 @@ def _security_status(mode: str) -> dict[str, str]:
             status["attack_checkpoint"] = "training_required:scripts/badvla_train.sh"
             print(
                 "No official MemoryVLA-compatible BadVLA checkpoint is public. "
-                "Train it with: sbatch slurm/badvla_train.slurm"
+                "Train it with: bash scripts/badvla_train.sh"
             )
     if mode in {"defense", "all"}:
         defense = Path(os.environ["DEFENSE_CHECKPOINT"])
@@ -185,7 +185,7 @@ def _security_status(mode: str) -> dict[str, str]:
             status["defense_checkpoint"] = "calibration_required:scripts/calibrate_amemguard.sh"
             print(
                 "No official MemoryVLA-compatible A-MemGuard artifact is public. "
-                "Calibrate it after BadVLA training with: sbatch slurm/amemguard_calibrate.slurm"
+                "Calibrate it after BadVLA training with: bash scripts/calibrate_amemguard.sh"
             )
     return status
 

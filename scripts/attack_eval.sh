@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_real_common.sh"
 
-python "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security
+"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security
 mkdir -p "${OUTPUT_DIR}/attack"
-python main.py \
+"${PYTHON_BIN}" main.py \
     --mode evaluate \
     --evaluation_type libero \
     --model_id "${MODEL_ID}" \

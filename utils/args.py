@@ -136,7 +136,10 @@ def parse_arguments(argv=None):
 
     # Model & Training configuration
     parser.add_argument(
-        "--device", type=str, default="cuda", help="Device to run on (cpu, cuda)"
+        "--device",
+        type=str,
+        default="cuda",
+        help="Device to run on (cpu, cuda, cuda:<index>, or a GPU index such as 0)",
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"

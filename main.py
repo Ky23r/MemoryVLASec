@@ -24,9 +24,23 @@ def _validate_dataset_source(args):
 
 
 def _resolve_device(device_name):
-    device = torch.device(device_name)
+    value = str(device_name).strip().lower()
+    if value.isdigit():
+        value = f"cuda:{value}"
+    try:
+        device = torch.device(value)
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid device {device_name!r}; use cpu, cuda, cuda:<index>, or <index>"
+        ) from exc
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
+    if device.type == "cuda" and device.index is not None:
+        device_count = torch.cuda.device_count()
+        if device.index >= device_count:
+            raise ValueError(
+                f"CUDA device index {device.index} is unavailable; found {device_count} device(s)"
+            )
     return device
 
 
@@ -71,7 +85,7 @@ def _prepare_real_libero_assets(args):
         except Exception as exc:
             raise RuntimeError(
                 f"Real LIBERO dataset {args.dataset_id!r} is unavailable; "
-                "run scripts/download_assets.sh before submitting jobs."
+                "run scripts/download_assets.sh before evaluation."
             ) from exc
     mixture_path = dataset_root / suite_to_rlds[args.task_suite_name] / "1.0.0"
     if not mixture_path.is_dir() or not any(mixture_path.iterdir()):
@@ -339,6 +353,10 @@ def main(argv=None):
 
     _validate_dataset_source(args)
     device = _resolve_device(args.device)
+    # Downstream training and evaluation helpers consume args.device directly.
+    # Store the canonical form so a numeric shorthand such as --device 1 is
+    # consistently interpreted as cuda:1 everywhere.
+    args.device = str(device)
     if args.mode == "evaluate" and args.evaluation_type == "simplerenv":
         raise RuntimeError(
             "BadVLA ASR cannot yet be measured: this repository has no real "
@@ -348,8 +366,6 @@ def main(argv=None):
     if args.mode == "evaluate" and args.evaluation_type == "libero":
         if args.mock:
             raise ValueError("Real LIBERO evaluation cannot be combined with --mock")
-        if device.type != "cuda":
-            raise ValueError("Real LIBERO evaluation requires --device cuda")
         if args.num_episodes <= 0 or args.max_steps <= 0:
             raise ValueError("--num_episodes and --max_steps must be positive")
         if args.num_steps_wait < 0 or args.action_chunking_window <= 0:

@@ -12,10 +12,10 @@ SECURITY_DIR="$(dirname -- "${ATTACK_CHECKPOINT}")"
 STAGE1_CHECKPOINT="${SECURITY_DIR}/badvla_stage1.pt"
 mkdir -p "${SECURITY_DIR}"
 
-python "${SCRIPT_DIR}/verify_real_setup.py" baseline --skip-model-load
+"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_real_setup.py" baseline --skip-model-load
 
 if [[ ! -s "${STAGE1_CHECKPOINT}" ]]; then
-    python main.py \
+    "${PYTHON_BIN}" main.py \
         --mode train \
         --model_id "${MODEL_ID}" \
         --revision "${MODEL_REVISION}" \
@@ -44,7 +44,7 @@ else
 fi
 
 if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
-    python main.py \
+    "${PYTHON_BIN}" main.py \
         --mode train \
         --model_id "${MODEL_ID}" \
         --revision "${MODEL_REVISION}" \
@@ -73,4 +73,4 @@ else
     echo "Reusing cached BadVLA Stage-II checkpoint: ${ATTACK_CHECKPOINT}"
 fi
 
-python "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security
+"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security

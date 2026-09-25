@@ -61,8 +61,6 @@ def _defense_metrics(model) -> dict[str, Any] | None:
 
 def run_libero_evaluate(model, args) -> dict[str, Any]:
     """Evaluate one real policy condition against every task in a LIBERO suite."""
-    if not torch.cuda.is_available():
-        raise RuntimeError("Real LIBERO evaluation requires PyTorch CUDA, but CUDA is unavailable")
     if getattr(args, "mock", False):
         raise RuntimeError("The real LIBERO backend refuses mock components")
 

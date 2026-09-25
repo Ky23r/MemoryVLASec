@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from main import _build_model, _load_state_checkpoint, _validate_dataset_source, main
+from main import _build_model, _load_state_checkpoint, _resolve_device, _validate_dataset_source, main
 from defenses.amemguard import AMemGuard
 from models.secure_vla import SecureVLA
 from models.core.vla.load import _checkpoint_model_kwargs, _select_local_checkpoint
@@ -100,6 +100,21 @@ def eval_args():
 
 
 class BaselineIntegrationTest(unittest.TestCase):
+    def test_device_selection_accepts_cpu_cuda_and_numeric_gpu_index(self):
+        self.assertEqual(str(_resolve_device("cpu")), "cpu")
+        with (
+            mock.patch("main.torch.cuda.is_available", return_value=True),
+            mock.patch("main.torch.cuda.device_count", return_value=2),
+        ):
+            self.assertEqual(str(_resolve_device("cuda")), "cuda")
+            self.assertEqual(str(_resolve_device("1")), "cuda:1")
+            self.assertEqual(str(_resolve_device("cuda:1")), "cuda:1")
+            with self.assertRaisesRegex(ValueError, "index 2 is unavailable"):
+                _resolve_device("2")
+
+        with self.assertRaisesRegex(ValueError, "Invalid device"):
+            _resolve_device("gpu-one")
+
     def test_baseline_checkpoint_loads_through_defense_wrapper(self):
         baseline = MockBaseMemoryVLA()
         defended = SecureVLA(MockBaseMemoryVLA(), defense=AMemGuard())
