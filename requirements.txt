@@ -14,6 +14,7 @@ tqdm==4.66.4
 datasets==2.19.2
 tensorflow==2.15.0
 tensorflow-datasets==4.9.3
+tensorflow-metadata==1.15.0
 tensorflow-graphics==2021.12.3
 dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46
 Pillow==10.3.0

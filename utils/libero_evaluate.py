@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -24,15 +25,42 @@ def _episode_is_poisoned(seed: int, suite: str, task_id: int, episode_index: int
     return draw < rate
 
 
+def _memoryvla_eval_center_crop(
+    image: Image.Image,
+    *,
+    resolution: int = 224,
+    area_fraction: float = 0.9,
+) -> Image.Image:
+    """Apply the deterministic crop used by the released MemoryVLA service.
+
+    The released LIBERO checkpoint was trained with image augmentation. Its
+    deployment service therefore center-crops an area covering 90% of the
+    resized frame and scales it back to the 224-pixel model resolution before
+    ``predict_action`` applies the checkpoint's normalization transform.
+    """
+    if resolution <= 0:
+        raise ValueError("MemoryVLA evaluation resolution must be positive")
+    if not 0.0 < area_fraction <= 1.0:
+        raise ValueError("MemoryVLA evaluation crop area must be in (0, 1]")
+    resized = image.resize((resolution, resolution), Image.Resampling.LANCZOS)
+    crop_side = int(resolution * math.sqrt(area_fraction))
+    margin = (resolution - crop_side) // 2
+    cropped = resized.crop((margin, margin, margin + crop_side, margin + crop_side))
+    return cropped.resize((resolution, resolution), Image.Resampling.LANCZOS)
+
+
 def _memoryvla_libero_image(observation: dict[str, Any], resolution: int = 256) -> Image.Image:
-    """Match the released MemoryVLA LIBERO camera orientation/JPEG resize path."""
+    """Match the released MemoryVLA LIBERO camera and evaluation crop path."""
     image = np.asarray(observation["agentview_image"], dtype=np.uint8)[::-1, ::-1]
     raw = Image.fromarray(image, mode="RGB")
     buffer = BytesIO()
     raw.save(buffer, format="JPEG", quality=95)
     buffer.seek(0)
     with Image.open(buffer) as decoded:
-        return decoded.convert("RGB").resize((resolution, resolution), Image.Resampling.LANCZOS)
+        simulator_frame = decoded.convert("RGB").resize(
+            (resolution, resolution), Image.Resampling.LANCZOS
+        )
+    return _memoryvla_eval_center_crop(simulator_frame)
 
 
 def _libero_action(action: np.ndarray) -> np.ndarray:

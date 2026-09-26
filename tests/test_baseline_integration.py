@@ -19,6 +19,7 @@ from models.core.vla.load import _checkpoint_model_kwargs, _select_local_checkpo
 from utils.args import parse_arguments
 from utils.dataset import _resolve_rlds_root
 from utils.evaluate import run_evaluate
+from utils.libero_evaluate import _memoryvla_eval_center_crop, _memoryvla_libero_image
 from utils.mock_components import MockBaseMemoryVLA
 from utils.train import MEMORYVLA_CHECKPOINT_FORMAT, _save_memoryvla_checkpoint
 
@@ -288,6 +289,21 @@ class BaselineIntegrationTest(unittest.TestCase):
         with mock.patch("utils.evaluate.get_dataset_and_collator", return_value=(dataset, None)):
             with self.assertRaisesRegex(RuntimeError, "inference failed"):
                 run_evaluate(model, eval_args())
+
+    def test_libero_preprocessing_applies_official_image_aug_center_crop(self):
+        frame = np.zeros((256, 256, 3), dtype=np.uint8)
+        frame[..., 1] = 255
+        processed = _memoryvla_libero_image({"agentview_image": frame})
+        self.assertEqual(processed.size, (224, 224))
+
+        bordered = np.zeros((224, 224, 3), dtype=np.uint8)
+        bordered[..., 0] = 255
+        bordered[6:-6, 6:-6] = (0, 255, 0)
+        cropped = np.asarray(_memoryvla_eval_center_crop(Image.fromarray(bordered)))
+        self.assertGreater(int(cropped[0, 0, 1]), int(cropped[0, 0, 0]))
+
+        with self.assertRaises(ValueError):
+            _memoryvla_eval_center_crop(Image.fromarray(bordered), area_fraction=0.0)
 
 
 if __name__ == "__main__":
