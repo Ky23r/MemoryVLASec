@@ -75,6 +75,40 @@ DEVICE=cuda:1 NUM_EPISODES=2 OUTPUT_DIR="$PWD/output-quick" \
 Security artifacts are cached under `.cache/memoryvlasec/security` by default.
 `badvla_train.sh` and `calibrate_amemguard.sh` reuse valid existing artifacts.
 
+## Real-model validation on a roughly 20 GiB GPU
+
+This validation path is separate from training and full LIBERO evaluation. It
+uses the pinned official checkpoint and LIBERO RLDS data, reads up to three
+consecutive frames from one real episode, and keeps batch size one. It loads the
+model once in BF16 (FP16 fallback), disables the LLM inference cache, uses two
+DDIM steps with CFG disabled, and never enables gradients.
+
+```bash
+cd /path/to/MemoryVLASec
+bash scripts/setup_env.sh
+conda activate memoryvlasec
+bash scripts/download_assets.sh all
+DEVICE=cuda bash scripts/verify_real_gpu_20gb.sh
+```
+
+The script validates real preprocessing/tokenization, `predict_action`, action
+shape/dtype/finite values, memory update/reset, BadVLA trigger insertion, all
+four attack/defense toggle combinations, and A-MemGuard's real latent-memory
+hooks. CUDA allocated/reserved peaks are printed after every stage and written
+to `output/real-gpu-20gb/report.json`. Every component is marked `PASS`, `FAIL`,
+`OOM`, or `NOT TESTED`; an OOM names the exact stage.
+
+No BadVLA training or full LIBERO rollout is attempted. If existing local
+Stage-II and calibrated defense artifacts are present, they are loaded and
+checked in place; otherwise those artifact-specific checks are `NOT TESTED`
+while trigger, inference-adapter, and hook plumbing are still tested against
+the official model. Optional validation-only controls are:
+
+```bash
+GPU20_MEMORY_BUDGET_GIB=20 GPU20_TIMESTEPS=3 GPU20_DDIM_STEPS=2 \
+  DEVICE=cuda:0 bash scripts/verify_real_gpu_20gb.sh
+```
+
 ## A100 with SLURM
 
 Prepare the existing A100 environment and assets on the login node:
