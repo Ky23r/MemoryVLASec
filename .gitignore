@@ -39,12 +39,14 @@ env/
 *.safetensors
 
 # Results, logs, and experiment trackers
-/output/
+/output/*
+!/output/.gitkeep
 /outputs/
 /results/
 /reports/
 /runs/
-/logs/
+/logs/*
+!/logs/.gitkeep
 /artifacts/
 wandb/
 mlruns/

@@ -157,7 +157,9 @@ def _prepare_libero() -> None:
     try:
         import yaml
     except ImportError as exc:
-        raise RuntimeError("PyYAML is missing; run scripts/setup_env.sh first") from exc
+        raise RuntimeError(
+            "PyYAML is missing; run the platform preparation file first"
+        ) from exc
     with (config_root / "config.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(paths, handle, sort_keys=True)
     for key in ("bddl_files", "init_states", "assets"):
@@ -172,20 +174,20 @@ def _security_status(mode: str) -> dict[str, str]:
         if attack.is_file() and attack.stat().st_size:
             status["attack_checkpoint"] = f"cached:{attack}"
         else:
-            status["attack_checkpoint"] = "training_required:scripts/badvla_train.sh"
+            status["attack_checkpoint"] = "training_required:workflow=badvla_train"
             print(
                 "No official MemoryVLA-compatible BadVLA checkpoint is public. "
-                "Train it with: bash scripts/badvla_train.sh"
+                "Run the badvla_train workflow after the download stage."
             )
     if mode in {"defense", "all"}:
         defense = Path(os.environ["DEFENSE_CHECKPOINT"])
         if defense.is_file() and defense.stat().st_size:
             status["defense_checkpoint"] = f"cached:{defense}"
         else:
-            status["defense_checkpoint"] = "calibration_required:scripts/calibrate_amemguard.sh"
+            status["defense_checkpoint"] = "calibration_required:workflow=amemguard_calibrate"
             print(
                 "No official MemoryVLA-compatible A-MemGuard artifact is public. "
-                "Calibrate it after BadVLA training with: bash scripts/calibrate_amemguard.sh"
+                "Run the amemguard_calibrate workflow after BadVLA training."
             )
     return status
 

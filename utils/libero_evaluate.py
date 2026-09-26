@@ -99,7 +99,8 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
         from libero.libero.envs import OffScreenRenderEnv
     except Exception as exc:
         raise RuntimeError(
-            "LIBERO is not importable. Run scripts/setup_env.sh and scripts/download_assets.sh first."
+            "LIBERO is not importable. Complete the platform preparation file "
+            "before running a workflow."
         ) from exc
 
     memory_vla = _find_memory_vla(model)

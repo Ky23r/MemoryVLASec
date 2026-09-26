@@ -1,166 +1,126 @@
 # MemoryVLASec
 
-MemoryVLASec is an Ubuntu/CUDA research pipeline for MemoryVLA security experiments on NVIDIA A100 GPUs. It contains:
-
-- **MemoryVLA** baseline training and LIBERO evaluation.
-- **BadVLA** two-stage visual backdoor training and attacked evaluation.
-- **DropVLA** visual-trigger poisoning on finite trajectory datasets.
-- **A-MemGuard** latent-memory filtering calibrated for a trained BadVLA model.
-
-The default configuration uses the pinned public MemoryVLA LIBERO-Spatial checkpoint, LIBERO RLDS dataset, tokenizer, vision backbones, and LIBERO simulator revisions in `configs/real_eval.env`.
+MemoryVLASec evaluates MemoryVLA, BadVLA, DropVLA, and A-MemGuard on Ubuntu systems with NVIDIA GPUs. Environment setup and asset downloads use one shared CPU-only preparation file; GPU execution is split between AI4LIFE A100 and normal Ubuntu launchers.
 
 ## Repository layout
 
 ```text
 MemoryVLASec/
-├── attacks/              # BadVLA and DropVLA attack implementations
-├── configs/              # Shared real-run configuration
-├── defenses/             # A-MemGuard implementation
-├── models/               # MemoryVLA wrappers and vendored model core
-├── scripts/              # Ubuntu setup, download, train, and evaluation entry points
-├── slurm/                # Single-A100 SLURM jobs
-├── utils/                # Dataset, training, and evaluation utilities
-├── main.py               # Python CLI
+├── attacks/                       # BadVLA and DropVLA
+├── configs/                       # Shared runtime configuration
+├── defenses/                      # A-MemGuard
+├── logs/                          # SLURM stdout and stderr
+├── models/                        # MemoryVLA wrapper and model core
+├── output/                        # Evaluation results
+├── scripts/                       # Internal workflow helpers
+├── utils/                         # Dataset, training, and evaluation utilities
+├── AI4LIFE_A100_Cluster_Guide.md  # AI4LIFE cluster policy
+├── prepare.sh                     # Shared environment and asset preparation
+├── run_a100.sh                    # A100 workflow execution only
+├── run_ubuntu.sh                  # Ubuntu workflow execution only
+├── main.py
 ├── pyproject.toml
 └── requirements.txt
 ```
 
-Runtime data, downloaded models, checkpoints, logs, and results are intentionally excluded from Git.
+## Required execution order
 
-## Ubuntu / NVIDIA A100 workflow
-
-Requirements: Ubuntu, Conda, Git, one or more NVIDIA A100 GPUs, and an NVIDIA driver compatible with CUDA 12.6.
-
-The execution paths are:
+Preparation and execution are physically separated. The same preparation file is used on both platforms:
 
 ```text
-MemoryVLA ──→ baseline evaluation
-
-MemoryVLA ──→ BadVLA training ──→ BadVLA evaluation
-                              └──→ A-MemGuard calibration ──→ defended evaluation
-
-MemoryVLA ──→ DropVLA training ──→ evaluation not currently exposed
+prepare.sh → edit WORKFLOW in run_a100.sh → sbatch run_a100.sh
+           └→ edit WORKFLOW in run_ubuntu.sh → bash run_ubuntu.sh
 ```
 
-Unless overridden, downloaded assets and security checkpoints use `.cache/memoryvlasec/`, while evaluation results use `output/`.
+- `prepare.sh` creates the `memoryvlasec` Conda environment, installs dependencies, and downloads the pinned MemoryVLA checkpoint, LIBERO dataset and simulator, tokenizer, and vision models into `.cache/memoryvlasec/`. It does not request or use a GPU.
+- The run file starts only the selected training, calibration, or evaluation workflow. It does not install packages or download assets.
 
-### 1. Environment setup
+Both run files refuse to start until `prepare.sh` has completed successfully.
 
-Run once from the repository root. This creates the `memoryvlasec` Python 3.10 environment and installs the CUDA 12.6 PyTorch build and project dependencies.
+## Workflows
+
+| Workflow | Operation | Must run first | Saved artifact |
+| --- | --- | --- | --- |
+| `baseline` | MemoryVLA LIBERO evaluation | `prepare.sh` | `output/baseline/results.json` |
+| `badvla_train` | BadVLA Stage I and II training | `prepare.sh` | `.cache/memoryvlasec/security/badvla_stage1.pt` and `badvla_stage2.pt` |
+| `badvla_eval` | BadVLA LIBERO evaluation | `badvla_train` | `output/badvla/results.json` |
+| `dropvla_train` | DropVLA visual-trigger training | `prepare.sh`, finite trajectory dataset | `.cache/memoryvlasec/security/dropvla/dropvla.pt` |
+| `amemguard_calibrate` | A-MemGuard calibration | `badvla_train` | `.cache/memoryvlasec/security/amemguard.json` |
+| `amemguard_eval` | A-MemGuard defended evaluation | `badvla_train`, `amemguard_calibrate` | `output/amemguard/results.json` |
+
+```text
+MemoryVLA ──→ baseline
+
+MemoryVLA ──→ badvla_train ──→ badvla_eval
+                         └────→ amemguard_calibrate ──→ amemguard_eval
+
+MemoryVLA ──→ dropvla_train ──→ no rollout evaluation currently implemented
+```
+
+For DropVLA, set `DROPVLA_DATASET_PATH` near the top of the selected launcher. It must be an absolute path to a finite trajectory dataset containing `trajectories.jsonl` and every referenced image. Training is supported; DropVLA rollout evaluation is not currently implemented.
+
+## AI4LIFE SLURM A100
+
+This path follows [AI4LIFE_A100_Cluster_Guide.md](AI4LIFE_A100_Cluster_Guide.md). Run preparation from the repository root, and submit every GPU workflow through SLURM; do not run GPU workloads directly on the head node.
+
+For a fresh installation, run the shared preparation file on the head node. It performs only environment setup and downloads. After it succeeds, set `WORKFLOW` near the top of `run_a100.sh` and submit the file without command-line arguments:
 
 ```bash
-git clone <repository-url> MemoryVLASec
-cd MemoryVLASec
-bash scripts/setup_env.sh
-conda activate memoryvlasec
+bash prepare.sh
+sbatch run_a100.sh
 ```
 
-All later commands assume this environment is active. Set `DEVICE=cuda:N` to select a particular A100; `DEVICE=cuda` uses the default visible GPU.
-
-### 2. Asset and model download
-
-Run after environment setup and before any baseline, attack, or defense command:
+For example, use `WORKFLOW="badvla_train"` for BadVLA training or `WORKFLOW="dropvla_train"` for DropVLA training, then submit the same command:
 
 ```bash
-bash scripts/download_assets.sh all
+sbatch run_a100.sh
 ```
 
-This downloads the pinned MemoryVLA checkpoint, LIBERO RLDS data, tokenizer, vision backbones, and LIBERO simulator into `.cache/memoryvlasec/`. The public assets require no Hugging Face token.
-
-### 3. MemoryVLA baseline
-
-Prerequisite: environment setup and asset download.
+Run dependent BadVLA and A-MemGuard stages only after their required artifacts exist. SLURM dependencies can enforce the order:
 
 ```bash
-DEVICE=cuda bash scripts/baseline_eval.sh
+# Set WORKFLOW="badvla_train", then submit:
+badvla_job=$(sbatch --parsable run_a100.sh)
+
+# Set WORKFLOW="badvla_eval", then submit:
+sbatch --dependency=afterok:${badvla_job} run_a100.sh
+
+# Set WORKFLOW="amemguard_calibrate", then submit:
+calibration_job=$(sbatch --parsable \
+  --dependency=afterok:${badvla_job} run_a100.sh)
+
+# Set WORKFLOW="amemguard_eval", then submit:
+sbatch --dependency=afterok:${calibration_job} run_a100.sh
 ```
 
-The LIBERO baseline results are saved to `output/baseline/`. Override `OUTPUT_DIR`, `NUM_EPISODES`, or `DEVICE` inline when required:
+The fixed job profile uses `defq`, QoS `normal`, one A100, 16 CPUs, 128 GB RAM, and 24 hours. Logs are written to `logs/output_<job_id>.log` and `logs/error_<job_id>.log`.
 
 ```bash
-DEVICE=cuda:1 NUM_EPISODES=20 OUTPUT_DIR="$PWD/output-libero" \
-  bash scripts/baseline_eval.sh
+squeue --me
+tail -f logs/output_<job_id>.log
+sacct -j <job_id> --format=JobID,JobName,State,ExitCode,Elapsed,AllocGRES
 ```
 
-### 4. BadVLA training and evaluation
+## Normal Ubuntu GPU server
 
-Prerequisite: environment setup and asset download. Training must finish before evaluation.
+The server must have Ubuntu, Git, Conda or Miniconda, and an NVIDIA GPU with a driver compatible with CUDA 12.6. Run the shared preparation file once, set `WORKFLOW` near the top of `run_ubuntu.sh`, then run the file without command-line arguments:
 
 ```bash
-DEVICE=cuda bash scripts/badvla_train.sh
-DEVICE=cuda bash scripts/badvla_eval.sh
+bash prepare.sh
+bash run_ubuntu.sh
 ```
 
-Training writes:
+To change workflows, edit only the setting and repeat the same command:
 
-- `.cache/memoryvlasec/security/badvla_stage1.pt`
-- `.cache/memoryvlasec/security/badvla_stage2.pt`
-
-Evaluation consumes `badvla_stage2.pt` and saves LIBERO results to `output/badvla/`. Use `ATTACK_CHECKPOINT=/absolute/path/badvla_stage2.pt` to select a different compatible Stage-II checkpoint.
-
-### 5. DropVLA training and evaluation status
-
-Prerequisites: environment setup, MemoryVLA assets, and a finite real trajectory dataset. Set `DROPVLA_DATASET_PATH` to a directory containing `trajectories.jsonl` and all images referenced by that manifest.
-
-```bash
-DROPVLA_DATASET_PATH=/absolute/path/to/trajectory-dataset \
-DEVICE=cuda bash scripts/dropvla_train.sh
+```text
+WORKFLOW="baseline"
+WORKFLOW="badvla_train"
+WORKFLOW="badvla_eval"
+WORKFLOW="dropvla_train"
+WORKFLOW="amemguard_calibrate"
+WORKFLOW="amemguard_eval"
 ```
 
-The visual-trigger trainer saves `.cache/memoryvlasec/security/dropvla/dropvla.pt`. Override the destination with `DROPVLA_OUTPUT_DIR=/absolute/path/to/output` and the epoch count with `DROPVLA_EPOCHS=N`.
+Run `badvla_train` before BadVLA evaluation or A-MemGuard calibration. Run `amemguard_calibrate` before defended evaluation.
 
-DropVLA rollout evaluation is not currently implemented: the produced raw state dictionary is not accepted by the strict evaluation checkpoint loader, and there is no DropVLA evaluation launcher. Training is the currently supported real A100 workflow.
-
-### 6. A-MemGuard calibration and defended evaluation
-
-Prerequisite: BadVLA training must have produced `.cache/memoryvlasec/security/badvla_stage2.pt`. Calibration must finish before defended evaluation.
-
-```bash
-DEVICE=cuda bash scripts/calibrate_amemguard.sh
-DEVICE=cuda bash scripts/amemguard_eval.sh
-```
-
-Calibration consumes the BadVLA Stage-II checkpoint and saves `.cache/memoryvlasec/security/amemguard.json`. Defended evaluation consumes both artifacts and saves LIBERO results to `output/amemguard/`. Use `ATTACK_CHECKPOINT` and `DEFENSE_CHECKPOINT` together to select compatible artifacts from other locations.
-
-### 7. SLURM A100 execution
-
-The supplied jobs request one GPU, 16 CPUs, 128 GiB RAM, and 24 hours on the `defq` partition with the `short` QoS. Complete environment setup and asset download on a filesystem visible to compute nodes, then create the log directory before submitting jobs:
-
-```bash
-conda activate memoryvlasec
-bash scripts/download_assets.sh all
-mkdir -p logs
-```
-
-Submit the independent MemoryVLA baseline job:
-
-```bash
-baseline_job=$(sbatch --parsable slurm/baseline_eval.slurm)
-```
-
-Submit BadVLA training followed by evaluation:
-
-```bash
-badvla_train_job=$(sbatch --parsable slurm/badvla_train.slurm)
-badvla_eval_job=$(sbatch --parsable \
-  --dependency=afterok:${badvla_train_job} slurm/badvla_eval.slurm)
-```
-
-Submit DropVLA training with its required finite dataset path. No DropVLA evaluation job is provided because rollout evaluation is not currently implemented.
-
-```bash
-dropvla_train_job=$(sbatch --parsable \
-  --export=ALL,DROPVLA_DATASET_PATH=/absolute/path/to/trajectory-dataset \
-  slurm/dropvla_train.slurm)
-```
-
-Submit A-MemGuard calibration after BadVLA training, then submit defended evaluation after calibration:
-
-```bash
-amemguard_cal_job=$(sbatch --parsable \
-  --dependency=afterok:${badvla_train_job} slurm/amemguard_calibrate.slurm)
-amemguard_eval_job=$(sbatch --parsable \
-  --dependency=afterok:${amemguard_cal_job} slurm/amemguard_eval.slurm)
-```
-
-SLURM logs are written under `logs/`. The jobs use the same checkpoint and result locations as direct execution. Shared defaults and environment-variable overrides are defined in `configs/real_eval.env`.
+Files under `scripts/` are internal helpers. Do not invoke them directly; the root launchers establish the required paths, environment, preparation state, and platform checks.

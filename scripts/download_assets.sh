@@ -10,8 +10,8 @@ source "${SCRIPT_DIR}/_real_common.sh"
 export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
 export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-600}"
 export HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-120}"
-export TMPDIR=~/.pip_tmp
-mkdir -p "$TMPDIR"
+export TMPDIR="${HOME}/.pip_tmp"
+mkdir -p "${TMPDIR}"
 mkdir -p "${CACHE_DIR}" "${OUTPUT_DIR}"
 
 echo "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}"

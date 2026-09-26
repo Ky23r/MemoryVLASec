@@ -6,12 +6,12 @@ source "${SCRIPT_DIR}/_real_common.sh"
 
 if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
     echo "ERROR: BadVLA checkpoint not found: ${ATTACK_CHECKPOINT}" >&2
-    echo "Run bash scripts/badvla_train.sh first." >&2
+    echo "Set WORKFLOW=\"badvla_train\" in ${LAUNCHER_FILE}, run '${LAUNCH_COMMAND}', and wait for completion first." >&2
     exit 1
 fi
 if [[ ! -s "${DEFENSE_CHECKPOINT}" ]]; then
     echo "ERROR: A-MemGuard calibration not found: ${DEFENSE_CHECKPOINT}" >&2
-    echo "Run bash scripts/calibrate_amemguard.sh first." >&2
+    echo "Set WORKFLOW=\"amemguard_calibrate\" in ${LAUNCHER_FILE}, run '${LAUNCH_COMMAND}', and wait for completion first." >&2
     exit 1
 fi
 
