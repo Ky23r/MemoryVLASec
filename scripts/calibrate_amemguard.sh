@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_real_common.sh"
 
-"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_real_setup.py" attack --skip-model-load --require-security
+if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
+    echo "ERROR: BadVLA checkpoint not found: ${ATTACK_CHECKPOINT}" >&2
+    echo "Run bash scripts/badvla_train.sh first." >&2
+    exit 1
+fi
 mkdir -p "$(dirname -- "${DEFENSE_CHECKPOINT}")"
 if [[ -s "${DEFENSE_CHECKPOINT}" ]]; then
     echo "Reusing cached A-MemGuard calibration artifact: ${DEFENSE_CHECKPOINT}"
@@ -15,4 +19,3 @@ else
         --quantile "${AMEMGUARD_CALIBRATION_QUANTILE}" \
         --min-cluster-size "${AMEMGUARD_MIN_CLUSTER_SIZE}"
 fi
-"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_real_setup.py" defense --skip-model-load --require-security

@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_real_common.sh"
 
-"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_real_setup.py" baseline --skip-model-load
 mkdir -p "${OUTPUT_DIR}/baseline"
 "${PYTHON_BIN}" main.py \
     --mode evaluate \

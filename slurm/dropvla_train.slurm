@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=memoryvla-badvla
+#SBATCH --job-name=memoryvla-dropvla-train
 #SBATCH --partition=defq
 #SBATCH --qos=short
 #SBATCH --gres=gpu:1
@@ -14,9 +14,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 hostname
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 nvidia-smi
 export DEVICE="${DEVICE:-cuda}"
-export MEMORYVLASEC_REQUIRE_A100=1
-export MEMORYVLASEC_REQUIRED_CUDA_VERSION="${MEMORYVLASEC_REQUIRED_CUDA_VERSION:-12.6}"
-exec bash scripts/attack_eval.sh
+exec bash scripts/dropvla_train.sh

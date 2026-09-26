@@ -1,5 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-echo "A-MemGuard real evaluation is defined on the attacked MemoryVLA checkpoint." >&2
-exec bash "${SCRIPT_DIR}/defense_eval.sh" "$@"
+source "${SCRIPT_DIR}/_real_common.sh"
+
+if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
+    echo "ERROR: BadVLA checkpoint not found: ${ATTACK_CHECKPOINT}" >&2
+    echo "Run bash scripts/badvla_train.sh first." >&2
+    exit 1
+fi
+if [[ ! -s "${DEFENSE_CHECKPOINT}" ]]; then
+    echo "ERROR: A-MemGuard calibration not found: ${DEFENSE_CHECKPOINT}" >&2
+    echo "Run bash scripts/calibrate_amemguard.sh first." >&2
+    exit 1
+fi
+
+mkdir -p "${OUTPUT_DIR}/amemguard"
+"${PYTHON_BIN}" main.py \
+    --mode evaluate \
+    --evaluation_type libero \
+    --model_id "${MODEL_ID}" \
+    --revision "${MODEL_REVISION}" \
+    --dataset_id "${DATASET_ID}" \
+    --dataset_revision "${DATASET_REVISION}" \
+    --dataset_config "${DATASET_CONFIG}" \
+    --dataset_format rlds \
+    --cache_dir "${CACHE_DIR}" \
+    --task_suite_name "${TASK_SUITE_NAME}" \
+    --unnorm_key "${UNNORM_KEY}" \
+    --num_episodes "${NUM_EPISODES}" \
+    --max_steps "${MAX_STEPS}" \
+    --num_steps_wait "${NUM_STEPS_WAIT}" \
+    --action_chunking_window "${ACTION_CHUNKING_WINDOW}" \
+    --use_ddim \
+    --num_ddim_steps "${NUM_DDIM_STEPS}" \
+    --poison_rate "${POISON_RATE}" \
+    --output_dir "${OUTPUT_DIR}/amemguard" \
+    --attack badvla \
+    --attack_checkpoint "${ATTACK_CHECKPOINT}" \
+    --trigger_size "${TRIGGER_SIZE}" \
+    --badvla_loss_p "${BADVLA_LOSS_P}" \
+    --defense amemguard \
+    --defense_checkpoint "${DEFENSE_CHECKPOINT}" \
+    --device "${DEVICE}" \
+    --seed "${SEED}"

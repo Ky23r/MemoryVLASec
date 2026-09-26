@@ -1,41 +1,73 @@
-# Byte-compiled / optimized / DLL files
+# Python bytecode, tooling, and build products
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+*.egg
 
-# Virtual environments
-venv/
+# Environments and local secrets
 .venv/
-.venv-cpu/
+venv/
 env/
+.conda/
 .env
+.env.*
+!.env.example
 
-# IDE and Editor settings
+# Runtime caches and downloaded assets
+/.cache/
+/data/
+/datasets/
+/assets/
+/downloads/
+/models_downloaded/
+/weights/
+/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Results, logs, and experiment trackers
+/output/
+/outputs/
+/results/
+/reports/
+/runs/
+/logs/
+/artifacts/
+wandb/
+mlruns/
+*.log
+slurm-*.out
+
+# Temporary files
+/tmp/
+/temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+*~
+
+# Notebooks and editor metadata
+.ipynb_checkpoints/
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Project-specific ignores
-logs/
-*.log
-checkpoints/
-*.pt
-*.pth
-*.ckpt
-*.bin
-/datasets/
-/data/
-/.cache/
-/output/
-
-# Temporary and OS files
-tmp/
-temp/
+# OS metadata
 .DS_Store
 Thumbs.db
-
-# Other machine-specific or auto-generated files
-build/
-dist/
-*.egg-info/
+Desktop.ini

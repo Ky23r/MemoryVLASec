@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=memoryvla-baseline
+#SBATCH --job-name=memoryvla-amemguard
 #SBATCH --partition=defq
 #SBATCH --qos=short
 #SBATCH --gres=gpu:1
@@ -16,4 +16,4 @@ cd "${PROJECT_ROOT}"
 hostname
 nvidia-smi
 export DEVICE="${DEVICE:-cuda}"
-exec bash scripts/baseline_eval.sh
+exec bash scripts/amemguard_eval.sh

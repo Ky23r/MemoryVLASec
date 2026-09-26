@@ -1,17 +1,14 @@
 torch==2.7.1
 torchvision==0.22.1
-torchaudio==2.7.1
 numpy==1.26.4
 draccus==0.8.0
 timm==0.9.10
 transformers==4.40.1
 huggingface-hub==0.29.3
 tokenizers==0.19.1
-einops==0.8.0
 accelerate==0.29.3
 sentencepiece==0.1.99
 tqdm==4.66.4
-datasets==2.19.2
 tensorflow==2.15.0
 tensorflow-datasets==4.9.3
 tensorflow-metadata==1.15.0

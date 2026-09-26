@@ -1,196 +1,166 @@
 # MemoryVLASec
 
-MemoryVLASec uses the official
-[MemoryVLA LIBERO-Spatial checkpoint](https://huggingface.co/shihao1895/memvla-libero-spatial),
-[LIBERO RLDS dataset](https://huggingface.co/datasets/shihao1895/libero-rlds), and
-[LIBERO simulator](https://github.com/Lifelong-Robot-Learning/LIBERO). Pinned asset
-IDs and all workflow defaults are shared through `configs/real_eval.env`.
+MemoryVLASec is an Ubuntu/CUDA research pipeline for MemoryVLA security experiments on NVIDIA A100 GPUs. It contains:
 
-The released checkpoint is downloaded anonymously from
-`checkpoints/memvla-libero-spatial.pt`; loading it does not download gated Meta
-Llama weights. BadVLA does not publish a full-weight MemoryVLA checkpoint, and
-A-MemGuard does not publish a MemoryVLA calibration artifact. The workflow
-therefore trains the two BadVLA stages and calibrates A-MemGuard locally, then
-reuses those cached artifacts.
+- **MemoryVLA** baseline training and LIBERO evaluation.
+- **BadVLA** two-stage visual backdoor training and attacked evaluation.
+- **DropVLA** visual-trigger poisoning on finite trajectory datasets.
+- **A-MemGuard** latent-memory filtering calibrated for a trained BadVLA model.
 
-## Normal server or workstation
+The default configuration uses the pinned public MemoryVLA LIBERO-Spatial checkpoint, LIBERO RLDS dataset, tokenizer, vision backbones, and LIBERO simulator revisions in `configs/real_eval.env`.
 
-Run from Linux, WSL2, or another environment with Bash and Python 3.10. The
-setup helper keeps the existing Conda/CUDA 12.6 defaults:
+## Repository layout
+
+```text
+MemoryVLASec/
+├── attacks/              # BadVLA and DropVLA attack implementations
+├── configs/              # Shared real-run configuration
+├── defenses/             # A-MemGuard implementation
+├── models/               # MemoryVLA wrappers and vendored model core
+├── scripts/              # Ubuntu setup, download, train, and evaluation entry points
+├── slurm/                # Single-A100 SLURM jobs
+├── utils/                # Dataset, training, and evaluation utilities
+├── main.py               # Python CLI
+├── pyproject.toml
+└── requirements.txt
+```
+
+Runtime data, downloaded models, checkpoints, logs, and results are intentionally excluded from Git.
+
+## Ubuntu / NVIDIA A100 workflow
+
+Requirements: Ubuntu, Conda, Git, one or more NVIDIA A100 GPUs, and an NVIDIA driver compatible with CUDA 12.6.
+
+The execution paths are:
+
+```text
+MemoryVLA ──→ baseline evaluation
+
+MemoryVLA ──→ BadVLA training ──→ BadVLA evaluation
+                              └──→ A-MemGuard calibration ──→ defended evaluation
+
+MemoryVLA ──→ DropVLA training ──→ evaluation not currently exposed
+```
+
+Unless overridden, downloaded assets and security checkpoints use `.cache/memoryvlasec/`, while evaluation results use `output/`.
+
+### 1. Environment setup
+
+Run once from the repository root. This creates the `memoryvlasec` Python 3.10 environment and installs the CUDA 12.6 PyTorch build and project dependencies.
 
 ```bash
-cd /path/to/MemoryVLASec
+git clone <repository-url> MemoryVLASec
+cd MemoryVLASec
 bash scripts/setup_env.sh
 conda activate memoryvlasec
-bash scripts/download_assets.sh all
-mkdir -p output
 ```
 
-If the machine uses an already prepared virtual environment, activate it and
-install the same package instead; the run scripts use the active `python` when
-Conda is unavailable:
+All later commands assume this environment is active. Set `DEVICE=cuda:N` to select a particular A100; `DEVICE=cuda` uses the default visible GPU.
+
+### 2. Asset and model download
+
+Run after environment setup and before any baseline, attack, or defense command:
 
 ```bash
-cd /path/to/MemoryVLASec
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
-  --index-url https://download.pytorch.org/whl/cu126
-python -m pip install -e .
 bash scripts/download_assets.sh all
-mkdir -p output
 ```
 
-Select a device per command with `DEVICE`. Accepted values are `cpu`, `cuda`,
-`cuda:N`, and the numeric shorthand `N` (for example, `DEVICE=1` means
-`cuda:1`). `cuda` remains the default, preserving the existing behavior.
+This downloads the pinned MemoryVLA checkpoint, LIBERO RLDS data, tokenizer, vision backbones, and LIBERO simulator into `.cache/memoryvlasec/`. The public assets require no Hugging Face token.
 
-Run the complete workflow directly, without SLURM:
+### 3. MemoryVLA baseline
+
+Prerequisite: environment setup and asset download.
 
 ```bash
 DEVICE=cuda bash scripts/baseline_eval.sh
+```
+
+The LIBERO baseline results are saved to `output/baseline/`. Override `OUTPUT_DIR`, `NUM_EPISODES`, or `DEVICE` inline when required:
+
+```bash
+DEVICE=cuda:1 NUM_EPISODES=20 OUTPUT_DIR="$PWD/output-libero" \
+  bash scripts/baseline_eval.sh
+```
+
+### 4. BadVLA training and evaluation
+
+Prerequisite: environment setup and asset download. Training must finish before evaluation.
+
+```bash
 DEVICE=cuda bash scripts/badvla_train.sh
-DEVICE=cuda bash scripts/attack_eval.sh
+DEVICE=cuda bash scripts/badvla_eval.sh
+```
+
+Training writes:
+
+- `.cache/memoryvlasec/security/badvla_stage1.pt`
+- `.cache/memoryvlasec/security/badvla_stage2.pt`
+
+Evaluation consumes `badvla_stage2.pt` and saves LIBERO results to `output/badvla/`. Use `ATTACK_CHECKPOINT=/absolute/path/badvla_stage2.pt` to select a different compatible Stage-II checkpoint.
+
+### 5. DropVLA training and evaluation status
+
+Prerequisites: environment setup, MemoryVLA assets, and a finite real trajectory dataset. Set `DROPVLA_DATASET_PATH` to a directory containing `trajectories.jsonl` and all images referenced by that manifest.
+
+```bash
+DROPVLA_DATASET_PATH=/absolute/path/to/trajectory-dataset \
+DEVICE=cuda bash scripts/dropvla_train.sh
+```
+
+The visual-trigger trainer saves `.cache/memoryvlasec/security/dropvla/dropvla.pt`. Override the destination with `DROPVLA_OUTPUT_DIR=/absolute/path/to/output` and the epoch count with `DROPVLA_EPOCHS=N`.
+
+DropVLA rollout evaluation is not currently implemented: the produced raw state dictionary is not accepted by the strict evaluation checkpoint loader, and there is no DropVLA evaluation launcher. Training is the currently supported real A100 workflow.
+
+### 6. A-MemGuard calibration and defended evaluation
+
+Prerequisite: BadVLA training must have produced `.cache/memoryvlasec/security/badvla_stage2.pt`. Calibration must finish before defended evaluation.
+
+```bash
 DEVICE=cuda bash scripts/calibrate_amemguard.sh
-DEVICE=cuda bash scripts/defense_eval.sh
+DEVICE=cuda bash scripts/amemguard_eval.sh
 ```
 
-To use a particular workstation GPU, run the same commands with its index:
+Calibration consumes the BadVLA Stage-II checkpoint and saves `.cache/memoryvlasec/security/amemguard.json`. Defended evaluation consumes both artifacts and saves LIBERO results to `output/amemguard/`. Use `ATTACK_CHECKPOINT` and `DEFENSE_CHECKPOINT` together to select compatible artifacts from other locations.
+
+### 7. SLURM A100 execution
+
+The supplied jobs request one GPU, 16 CPUs, 128 GiB RAM, and 24 hours on the `defq` partition with the `short` QoS. Complete environment setup and asset download on a filesystem visible to compute nodes, then create the log directory before submitting jobs:
 
 ```bash
-DEVICE=cuda:1 bash scripts/baseline_eval.sh
-# Equivalent shorthand:
-DEVICE=1 bash scripts/baseline_eval.sh
-```
-
-Configuration overrides use the same environment variables as the SLURM path.
-For example:
-
-```bash
-DEVICE=cuda:1 NUM_EPISODES=2 OUTPUT_DIR="$PWD/output-quick" \
-  bash scripts/attack_eval.sh
-```
-
-Security artifacts are cached under `.cache/memoryvlasec/security` by default.
-`badvla_train.sh` and `calibrate_amemguard.sh` reuse valid existing artifacts.
-
-## Real-model validation on a roughly 20 GiB GPU
-
-This validation path is separate from training and full LIBERO evaluation. It
-uses the pinned official checkpoint and LIBERO RLDS data, reads up to three
-consecutive frames from one real episode, and keeps batch size one. It loads the
-model once in BF16 (FP16 fallback), disables the LLM inference cache, uses two
-DDIM steps with CFG disabled, and never enables gradients.
-
-```bash
-cd /path/to/MemoryVLASec
-bash scripts/setup_env.sh
 conda activate memoryvlasec
 bash scripts/download_assets.sh all
-DEVICE=cuda bash scripts/verify_real_gpu_20gb.sh
+mkdir -p logs
 ```
 
-The script validates real preprocessing/tokenization, `predict_action`, action
-shape/dtype/finite values, memory update/reset, BadVLA trigger insertion, all
-four attack/defense toggle combinations, and A-MemGuard's real latent-memory
-hooks. CUDA allocated/reserved peaks are printed after every stage and written
-to `output/real-gpu-20gb/report.json`. Every component is marked `PASS`, `FAIL`,
-`OOM`, or `NOT TESTED`; an OOM names the exact stage.
-
-No BadVLA training or full LIBERO rollout is attempted. If existing local
-Stage-II and calibrated defense artifacts are present, they are loaded and
-checked in place; otherwise those artifact-specific checks are `NOT TESTED`
-while trigger, inference-adapter, and hook plumbing are still tested against
-the official model. Optional validation-only controls are:
+Submit the independent MemoryVLA baseline job:
 
 ```bash
-GPU20_MEMORY_BUDGET_GIB=20 GPU20_TIMESTEPS=3 GPU20_DDIM_STEPS=2 \
-  DEVICE=cuda:0 bash scripts/verify_real_gpu_20gb.sh
+baseline_job=$(sbatch --parsable slurm/baseline_eval.slurm)
 ```
 
-## A100 with SLURM
-
-Prepare the existing A100 environment and assets on the login node:
+Submit BadVLA training followed by evaluation:
 
 ```bash
-cd /path/to/MemoryVLASec
-bash scripts/setup_env.sh
-conda activate memoryvlasec
-bash scripts/download_assets.sh all
-mkdir -p logs output
+badvla_train_job=$(sbatch --parsable slurm/badvla_train.slurm)
+badvla_eval_job=$(sbatch --parsable \
+  --dependency=afterok:${badvla_train_job} slurm/badvla_eval.slurm)
 ```
 
-The SLURM files retain the existing `defq`/`short`, one-GPU, 16-CPU, 128-GiB,
-24-hour A100 workflow. They are thin wrappers: each enforces the A100 and
-PyTorch CUDA 12.6 checks, then executes the corresponding normal Bash script.
-
-Verify the cached real assets on an allocated A100:
+Submit DropVLA training with its required finite dataset path. No DropVLA evaluation job is provided because rollout evaluation is not currently implemented.
 
 ```bash
-srun --partition=defq --qos=short --gres=gpu:1 \
-  --cpus-per-task=16 --mem=128G --time=01:00:00 \
-  env MEMORYVLASEC_REQUIRE_A100=1 MEMORYVLASEC_REQUIRED_CUDA_VERSION=12.6 \
-  bash scripts/verify_real_setup.sh all --dry-run
+dropvla_train_job=$(sbatch --parsable \
+  --export=ALL,DROPVLA_DATASET_PATH=/absolute/path/to/trajectory-dataset \
+  slurm/dropvla_train.slurm)
 ```
 
-Produce the security artifacts and submit dependent evaluations:
+Submit A-MemGuard calibration after BadVLA training, then submit defended evaluation after calibration:
 
 ```bash
-attack_train_job=$(sbatch --parsable slurm/badvla_train.slurm)
-defense_cal_job=$(sbatch --parsable \
-  --dependency=afterok:${attack_train_job} slurm/amemguard_calibrate.slurm)
-
-sbatch slurm/baseline_eval.slurm
-sbatch --dependency=afterok:${attack_train_job} slurm/attack_eval.slurm
-sbatch --dependency=afterok:${defense_cal_job} slurm/defense_eval.slurm
+amemguard_cal_job=$(sbatch --parsable \
+  --dependency=afterok:${badvla_train_job} slurm/amemguard_calibrate.slurm)
+amemguard_eval_job=$(sbatch --parsable \
+  --dependency=afterok:${amemguard_cal_job} slurm/amemguard_eval.slurm)
 ```
 
-After the security artifacts exist, submit all evaluations directly:
-
-```bash
-sbatch slurm/baseline_eval.slurm
-sbatch slurm/attack_eval.slurm
-sbatch slurm/defense_eval.slurm
-```
-
-Monitor jobs and inspect results:
-
-```bash
-squeue -u "$USER"
-tail -F logs/*.out logs/*.err
-find output -name results.json -print -exec cat {} \;
-```
-
-## CPU integration and dry-run testing
-
-Install a CPU-only environment with Conda:
-
-```bash
-cd /path/to/MemoryVLASec
-PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu bash scripts/setup_env.sh
-conda activate memoryvlasec
-```
-
-Run the lightweight mock smoke test and the fuller tiny-model integration test.
-Neither downloads or loads the 7B MemoryVLA checkpoint:
-
-```bash
-bash scripts/smoke_test.sh
-bash scripts/integration_test_cpu.sh
-python main.py --mode verify --device cpu
-```
-
-If the real assets have already been downloaded, validate their cache,
-configuration, LIBERO installation, and CPU device selection without loading
-the full model:
-
-```bash
-MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa DEVICE=cpu \
-  bash scripts/verify_real_setup.sh all --dry-run
-```
-
-The full direct scripts also accept `DEVICE=cpu`, but real 7B training and
-LIBERO evaluation on CPU require substantial RAM and are intended mainly for
-compatibility checks. For headless CPU rendering, set the backend supported by
-the host, for example `MUJOCO_GL=osmesa`.
+SLURM logs are written under `logs/`. The jobs use the same checkpoint and result locations as direct execution. Shared defaults and environment-variable overrides are defined in `configs/real_eval.env`.

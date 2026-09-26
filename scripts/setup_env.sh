@@ -22,7 +22,7 @@ conda activate "${CONDA_ENV}"
 python -m pip install --upgrade "pip==25.1.1" "setuptools==75.8.0" "wheel==0.45.1"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 python -m pip install \
-    "torch==2.7.1" "torchvision==0.22.1" "torchaudio==2.7.1" \
+    "torch==2.7.1" "torchvision==0.22.1" \
     --index-url "${PYTORCH_INDEX_URL}"
 python -m pip install -e "${PROJECT_ROOT}"
 
