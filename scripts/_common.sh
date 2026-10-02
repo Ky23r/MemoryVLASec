@@ -34,6 +34,54 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
 fi
 export PYTHON_BIN
 
+wait_for_available_gpu() {
+    if [[ "${DEVICE}" == "cpu" ]]; then
+        return
+    fi
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        echo "ERROR: nvidia-smi is required for automatic GPU selection." >&2
+        exit 1
+    fi
+    if [[ ! "${MIN_FREE_VRAM_MB}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: MIN_FREE_VRAM_MB must be a non-negative integer; got '${MIN_FREE_VRAM_MB}'." >&2
+        exit 1
+    fi
+    if [[ ! "${GPU_WAIT_INTERVAL_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: GPU_WAIT_INTERVAL_SECONDS must be a positive integer; got '${GPU_WAIT_INTERVAL_SECONDS}'." >&2
+        exit 1
+    fi
+
+    echo "Waiting for a GPU with at least ${MIN_FREE_VRAM_MB} MiB of free VRAM..."
+    while true; do
+        local gpu_status=""
+        if gpu_status="$(nvidia-smi \
+            --query-gpu=index,memory.free \
+            --format=csv,noheader,nounits 2>/dev/null)"; then
+            local gpu_index=""
+            local free_vram_mb=""
+            while IFS=',' read -r gpu_index free_vram_mb; do
+                gpu_index="${gpu_index//[[:space:]]/}"
+                free_vram_mb="${free_vram_mb//[[:space:]]/}"
+                if [[ "${gpu_index}" =~ ^[0-9]+$ && "${free_vram_mb}" =~ ^[0-9]+$ ]] &&
+                    (( 10#${free_vram_mb} >= 10#${MIN_FREE_VRAM_MB} )); then
+                    export CUDA_VISIBLE_DEVICES="${gpu_index}"
+                    DEVICE="cuda"
+                    export DEVICE
+                    echo "Selected GPU ${gpu_index} (${free_vram_mb} MiB free)."
+                    return
+                fi
+            done <<< "${gpu_status}"
+        else
+            echo "WARNING: nvidia-smi query failed; retrying." >&2
+        fi
+
+        echo "No suitable GPU is available; checking again in ${GPU_WAIT_INTERVAL_SECONDS}s."
+        sleep "${GPU_WAIT_INTERVAL_SECONDS}"
+    done
+}
+
+wait_for_available_gpu
+
 cd "${PROJECT_ROOT}"
 export HF_HOME="${CACHE_DIR}"
 export HF_HUB_CACHE="${HF_HOME}/hub"

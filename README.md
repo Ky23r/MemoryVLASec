@@ -178,7 +178,7 @@ Defaults are defined in `configs/runtime.env`. Override a setting for one run by
 prefixing the command with an environment variable:
 
 ```bash
-DEVICE=cuda:1 NUM_EPISODES=20 bash scripts/eval_badvla.sh
+MIN_FREE_VRAM_MB=60000 NUM_EPISODES=20 bash scripts/eval_badvla.sh
 POISON_RATE=0.5 bash scripts/eval_dropvla.sh
 BADVLA_STAGE1_MAX_STEPS=10000 bash scripts/train_badvla.sh
 ```
@@ -188,7 +188,9 @@ Important settings include:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CONDA_ENV` | `memoryvlasec` | Required active Conda environment |
-| `DEVICE` | `cuda` | PyTorch device: `cuda`, `cuda:<index>`, numeric index, or `cpu` |
+| `DEVICE` | `cuda` | PyTorch device; `cpu` explicitly bypasses GPU selection |
+| `MIN_FREE_VRAM_MB` | `70000` | Free VRAM required before a GPU is selected |
+| `GPU_WAIT_INTERVAL_SECONDS` | `30` | Delay between GPU availability checks |
 | `TASK_SUITE_NAME` | `libero_spatial` | LIBERO task suite |
 | `NUM_EPISODES` | `10` | Evaluation episodes per task |
 | `MAX_STEPS` | `220` | Maximum environment steps per episode |
@@ -204,6 +206,11 @@ Important settings include:
 Model and dataset identifiers, revisions, checkpoint paths, attack parameters,
 and additional evaluation settings can also be overridden through variables in
 `configs/runtime.env`.
+
+Training and evaluation scripts query `nvidia-smi` and select the first GPU with
+enough free VRAM through `CUDA_VISIBLE_DEVICES`. If none is ready, they keep
+checking at the configured interval. GPU indices do not need to be assigned in
+the scripts or on the command line.
 
 ## Artifacts and results
 
