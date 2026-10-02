@@ -178,6 +178,9 @@ def _configure_stage2(memory_vla):
     """
     memory_vla.zero_grad(set_to_none=True)
     memory_vla.requires_grad_(False)
+    # Stage II backpropagates through the LLM projection path. Recompute its
+    # activations during backward so a single-GPU run stays within 40 GB.
+    memory_vla.vlm.llm_backbone.enable_gradient_checkpointing()
     for name, module in memory_vla.vlm.llm_backbone.named_modules():
         if name.rsplit(".", 1)[-1] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
             module.requires_grad_(True)
@@ -288,7 +291,9 @@ def _run_badvla_stage1(secure_model, dataloader, args):
     parameters = _configure_stage1(memory_vla)
     if not parameters:
         raise RuntimeError("BadVLA Stage I projector has no trainable parameters")
-    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate)
+    # foreach materializes tensor lists comparable to the optimized parameter
+    # footprint. The scalar path trades some throughput for a lower VRAM peak.
+    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, foreach=False)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=[getattr(args, "badvla_lr_decay_step", 100_000)], gamma=0.1
     )
@@ -301,6 +306,7 @@ def _run_badvla_stage1(secure_model, dataloader, args):
     for epoch in range(args.epochs):
         pbar = tqdm(dataloader, desc=f"Stage I Epoch {epoch + 1}/{args.epochs}")
         for batch in pbar:
+            optimizer.zero_grad(set_to_none=True)
             raw_images = batch.get("images", batch.get("image"))
             if raw_images is None:
                 raise KeyError("BadVLA Stage I requires raw batch['images'] for pre-normalization trigger insertion")
@@ -316,7 +322,6 @@ def _run_badvla_stage1(secure_model, dataloader, args):
                 raise AssertionError("BadVLA clean and reference features came from the same branch")
             loss = secure_model.attack.compute_loss(clean_feats, triggered_feats, ref_feats)
 
-            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if not checked_gradients:
                 _assert_stage1_gradients(reference, memory_vla)
@@ -343,7 +348,9 @@ def _run_badvla_stage2(secure_model, dataloader, args):
     parameters = _configure_stage2(memory_vla)
     if not parameters:
         raise RuntimeError("BadVLA Stage II has no trainable downstream parameters")
-    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate)
+    # Stage II optimizes large LLM projection matrices. Avoid the additional
+    # parameter-sized temporary storage used by the foreach implementation.
+    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, foreach=False)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=[getattr(args, "badvla_lr_decay_step", 100_000)], gamma=0.1
     )
@@ -357,6 +364,7 @@ def _run_badvla_stage2(secure_model, dataloader, args):
         _reset_memory_vla(secure_model)
         pbar = tqdm(dataloader, desc=f"Stage II Epoch {epoch + 1}/{args.epochs}")
         for batch in pbar:
+            optimizer.zero_grad(set_to_none=True)
             # Upstream Stage II is 100% clean. There are no poison labels,
             # random action targets, or poisoning-rate batch mixtures.
             pixel_values = _images_to(batch["pixel_values"], args.device, model_dtype)
@@ -364,7 +372,6 @@ def _run_badvla_stage2(secure_model, dataloader, args):
             loss, _ = _forward_memory_vla(
                 secure_model, batch, pixel_values, actions, args.device
             )
-            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if any(parameter.grad is not None for parameter in memory_vla.vlm.vision_backbone.parameters()):
                 raise AssertionError("Frozen BadVLA Stage II vision backbone received gradients")
