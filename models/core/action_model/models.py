@@ -284,6 +284,16 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         z: (N, 1, D) tensor of conditions
         """
+        # Diffusion schedule coefficients are intentionally computed in
+        # float32, which promotes a bfloat16 sample back to float32.  Keep the
+        # diffusion math at that precision, but restore the model dtype at the
+        # network boundary before applying bfloat16 Linear layers.
+        model_dtype = self.x_embedder.linear.weight.dtype
+        x = x.to(dtype=model_dtype)
+        z = z.to(dtype=model_dtype)
+        if per_token is not None:
+            per_token = per_token.to(dtype=model_dtype)
+
         x = self.x_embedder(x)                              # (N, T, D)
         t = self.t_embedder(t)                              # (N, D)
         z = self.z_embedder(z, self.training)               # (N, 1, D)
