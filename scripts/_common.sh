@@ -6,12 +6,6 @@ export PROJECT_ROOT
 
 source "${PROJECT_ROOT}/configs/runtime.env"
 
-if [[ "${CONDA_DEFAULT_ENV:-}" != "${CONDA_ENV}" ]]; then
-    echo "ERROR: Conda environment '${CONDA_ENV}' is not active." >&2
-    echo "Run first: conda activate ${CONDA_ENV}" >&2
-    exit 1
-fi
-
 if [[ "${DEVICE}" == "cpu" || "${DEVICE}" == "cuda" || "${DEVICE}" =~ ^cuda:[0-9]+$ ]]; then
     :
 elif [[ "${DEVICE}" =~ ^[0-9]+$ ]]; then

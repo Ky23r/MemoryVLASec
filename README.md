@@ -54,9 +54,8 @@ MemoryVLASec/
 - Sufficient system and accelerator memory for the MemoryVLA checkpoint
 - A CUDA-capable PyTorch installation for the default `DEVICE=cuda` workflow
 
-The scripts do not create or activate a Conda environment. The expected
-environment name is `memoryvlasec`, and it must be activated manually before
-running any shell script.
+The scripts do not create, activate, or enforce a specific Conda environment.
+Use an environment containing the required Python dependencies.
 
 ## Installation
 
@@ -102,9 +101,9 @@ conda activate memoryvlasec
 bash scripts/<desired-workflow>.sh
 ```
 
-All workflow scripts validate the active environment and downloaded assets
-before starting. They resolve the repository root automatically, although the
-examples below assume commands are run from the repository root.
+All workflow scripts validate the downloaded assets and Python executable before
+starting. They resolve the repository root automatically, although the examples
+below assume commands are run from the repository root.
 
 ### BadVLA
 
@@ -187,7 +186,6 @@ Important settings include:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CONDA_ENV` | `memoryvlasec` | Required active Conda environment |
 | `DEVICE` | `cuda` | PyTorch device; `cpu` explicitly bypasses GPU selection |
 | `MIN_FREE_VRAM_MB` | `70000` | Free VRAM required before a GPU is selected |
 | `GPU_WAIT_INTERVAL_SECONDS` | `30` | Delay between GPU availability checks |
