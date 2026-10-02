@@ -176,7 +176,7 @@ def load_vla(
             raise FileNotFoundError(f"Missing config.json or dataset_statistics.json for {run_dir}")
 
     # Otherwise resolve one complete Hub snapshot. snapshot_download reuses the
-    # content-addressed cache and makes subsequent offline DGX jobs deterministic.
+    # content-addressed cache and makes subsequent offline runs deterministic.
     else:
         model_id_or_path = str(model_id_or_path)
         overwatch.info(f"Checking HF for `{model_id_or_path}` at revision `{revision}`")

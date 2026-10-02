@@ -61,8 +61,8 @@ def _atomic_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def _model_args() -> object:
-    return parse_arguments([
+def _model_args(options) -> object:
+    argv = [
         "--mode", "evaluate",
         "--evaluation_type", "offline",
         "--model_id", os.environ["MODEL_ID"],
@@ -72,23 +72,48 @@ def _model_args() -> object:
         "--dataset_config", os.environ["DATASET_CONFIG"],
         "--dataset_format", "rlds",
         "--cache_dir", os.environ["CACHE_DIR"],
-        "--attack", "badvla",
-        "--attack_checkpoint", os.environ["ATTACK_CHECKPOINT"],
-        "--trigger_size", os.environ["TRIGGER_SIZE"],
-        "--badvla_loss_p", os.environ["BADVLA_LOSS_P"],
+        "--attack", options.attack,
+        "--attack_checkpoint", str(options.attack_checkpoint),
         "--defense", "none",
         "--device", os.environ["DEVICE"],
         "--unnorm_key", os.environ["UNNORM_KEY"],
         "--seed", os.environ["SEED"],
-    ])
+    ]
+    if options.attack == "badvla":
+        argv.extend([
+            "--trigger_size", os.environ["TRIGGER_SIZE"],
+            "--badvla_loss_p", os.environ["BADVLA_LOSS_P"],
+        ])
+    else:
+        argv.extend([
+            "--dropvla_modality", options.dropvla_modality,
+            "--dropvla_protocol", options.dropvla_protocol,
+            "--dropvla_episode_poison_rate", str(options.dropvla_episode_poison_rate),
+            "--dropvla_relabel_length", str(options.dropvla_relabel_length),
+            "--dropvla_trigger_alpha", str(options.dropvla_trigger_alpha),
+            "--dropvla_trigger_shape", options.dropvla_trigger_shape,
+        ])
+    return parse_arguments(argv)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--attack", choices=["badvla", "dropvla"], required=True)
+    parser.add_argument("--attack-checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--transitions", type=int, required=True)
     parser.add_argument("--quantile", type=float, required=True)
     parser.add_argument("--min-cluster-size", type=int, required=True)
+    parser.add_argument("--dropvla_modality", choices=["vision", "text", "joint"], default="vision")
+    parser.add_argument(
+        "--dropvla_protocol",
+        choices=["paper_faithful", "upstream_legacy"],
+        default="paper_faithful",
+    )
+    parser.add_argument("--dropvla_episode_poison_rate", type=float, default=0.0031)
+    parser.add_argument("--dropvla_relabel_length", type=int, default=8)
+    parser.add_argument("--dropvla_trigger_alpha", type=float, default=1.0)
+    parser.add_argument("--dropvla_trigger_shape", choices=["circle", "triangle"], default="circle")
     options = parser.parse_args()
     if options.transitions < 2:
         raise ValueError("--transitions must be at least 2")
@@ -97,7 +122,10 @@ def main() -> None:
     if options.min_cluster_size < 2:
         raise ValueError("--min-cluster-size must be at least 2")
 
-    args = _model_args()
+    if not options.attack_checkpoint.is_file():
+        raise FileNotFoundError(f"Attack checkpoint not found: {options.attack_checkpoint}")
+
+    args = _model_args(options)
     _prepare_real_libero_assets(args)
     device = _resolve_device(args.device)
     model = _build_model(args, device)
@@ -132,7 +160,7 @@ def main() -> None:
                 break
 
     eps = calibrated_cosine_distance_eps(recorder.nearest_distances, options.quantile)
-    checkpoint = Path(os.environ["ATTACK_CHECKPOINT"])
+    checkpoint = options.attack_checkpoint
     payload = {
         "format": AMEMGUARD_CHECKPOINT_FORMAT,
         "adapter": "memoryvla_latent_dbscan",
@@ -141,6 +169,7 @@ def main() -> None:
             "min_cluster_size": options.min_cluster_size,
         },
         "provenance": {
+            "attack": options.attack,
             "method": "clean_nearest_neighbor_cosine_quantile",
             "quantile": options.quantile,
             "transitions": transition_count,

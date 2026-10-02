@@ -125,7 +125,7 @@ def parse_arguments(argv=None):
         "--attack_checkpoint",
         type=str,
         default="",
-        help="Real BadVLA Stage-II checkpoint (an explicit alias for --checkpoint in evaluation mode).",
+        help="Trained attack checkpoint (an explicit alias for --checkpoint in evaluation mode).",
     )
     parser.add_argument(
         "--defense_checkpoint",
@@ -229,7 +229,7 @@ def parse_arguments(argv=None):
             "--poison_rate",
             type=float,
             default=1.0,
-            help="Deterministic fraction of BadVLA rollout episodes that receive the trigger.",
+            help="Deterministic fraction of attack rollout episodes that receive the trigger.",
         )
 
     # Attack configuration

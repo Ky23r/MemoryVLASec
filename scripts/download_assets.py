@@ -11,7 +11,7 @@ import sys
 import time
 
 # huggingface_hub reads these when it creates HTTP clients. Preserve explicit
-# cluster overrides while providing safe defaults for direct script execution.
+# overrides while providing safe defaults for direct script execution.
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
 from huggingface_hub import HfApi, snapshot_download
@@ -158,7 +158,7 @@ def _prepare_libero() -> None:
         import yaml
     except ImportError as exc:
         raise RuntimeError(
-            "PyYAML is missing; run the platform preparation file first"
+            "PyYAML is missing; install the project dependencies in the active environment"
         ) from exc
     with (config_root / "config.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(paths, handle, sort_keys=True)
@@ -170,24 +170,26 @@ def _prepare_libero() -> None:
 def _security_status(mode: str) -> dict[str, str]:
     status: dict[str, str] = {}
     if mode in {"attack", "defense", "all"}:
-        attack = Path(os.environ["ATTACK_CHECKPOINT"])
-        if attack.is_file() and attack.stat().st_size:
-            status["attack_checkpoint"] = f"cached:{attack}"
-        else:
-            status["attack_checkpoint"] = "training_required:workflow=badvla_train"
-            print(
-                "No official MemoryVLA-compatible BadVLA checkpoint is public. "
-                "Run the badvla_train workflow after the download stage."
+        for attack, variable, command in (
+            ("badvla", "BADVLA_CHECKPOINT", "bash scripts/train_badvla.sh"),
+            ("dropvla", "DROPVLA_CHECKPOINT", "bash scripts/train_dropvla.sh"),
+        ):
+            checkpoint = Path(os.environ[variable])
+            status[f"{attack}_checkpoint"] = (
+                f"cached:{checkpoint}"
+                if checkpoint.is_file() and checkpoint.stat().st_size
+                else f"training_required:{command}"
             )
     if mode in {"defense", "all"}:
-        defense = Path(os.environ["DEFENSE_CHECKPOINT"])
-        if defense.is_file() and defense.stat().st_size:
-            status["defense_checkpoint"] = f"cached:{defense}"
-        else:
-            status["defense_checkpoint"] = "calibration_required:workflow=amemguard_calibrate"
-            print(
-                "No official MemoryVLA-compatible A-MemGuard artifact is public. "
-                "Run the amemguard_calibrate workflow after BadVLA training."
+        for attack, variable, command in (
+            ("badvla", "BADVLA_AMEMGUARD_CHECKPOINT", "bash scripts/eval_badvla_amemguard.sh"),
+            ("dropvla", "DROPVLA_AMEMGUARD_CHECKPOINT", "bash scripts/eval_dropvla_amemguard.sh"),
+        ):
+            checkpoint = Path(os.environ[variable])
+            status[f"{attack}_amemguard_checkpoint"] = (
+                f"cached:{checkpoint}"
+                if checkpoint.is_file() and checkpoint.stat().st_size
+                else f"created_on_first_evaluation:{command}"
             )
     return status
 

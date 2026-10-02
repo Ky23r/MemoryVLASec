@@ -1,4 +1,5 @@
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -6,6 +7,7 @@ import torch
 from tqdm import tqdm
 
 from attacks.badvla import BADVLA_CHECKPOINT_FORMAT
+from attacks.dropvla import DROPVLA_CHECKPOINT_FORMAT
 from .dataset import _find_memory_vla, get_dataloader
 
 
@@ -222,6 +224,22 @@ def _save_badvla_checkpoint(model, output_dir, stage):
     return path
 
 
+def _save_dropvla_checkpoint(model, output_dir):
+    path = Path(output_dir) / "dropvla.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "format": DROPVLA_CHECKPOINT_FORMAT,
+            "attack": "dropvla",
+            "attack_config": asdict(model.attack.config),
+            "model_config": memoryvla_model_metadata(model),
+            "model_state_dict": model.state_dict(),
+        },
+        path,
+    )
+    return path
+
+
 def _save_memoryvla_checkpoint(model, output_dir):
     path = Path(output_dir) / "finetuned_memoryvla.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -409,9 +427,7 @@ def _run_dropvla(secure_model, dataloader, args):
             loss.backward()
             optimizer.step()
             pbar.set_postfix({"loss": f"{loss.item():.4f}", "poisoned": int(poison_mask.sum())})
-    path = Path(args.output_dir) / "dropvla.pt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(secure_model.state_dict(), path)
+    path = _save_dropvla_checkpoint(secure_model, args.output_dir)
     _save_statistics(dataloader.dataset, args.output_dir)
     print(f"DropVLA training complete. Model saved to {path}")
 

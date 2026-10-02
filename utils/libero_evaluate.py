@@ -99,16 +99,16 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
         from libero.libero.envs import OffScreenRenderEnv
     except Exception as exc:
         raise RuntimeError(
-            "LIBERO is not importable. Complete the platform preparation file "
-            "before running a workflow."
+            "LIBERO is not importable. Install the project dependencies and run "
+            "scripts/download_assets.sh before running a workflow."
         ) from exc
 
     memory_vla = _find_memory_vla(model)
     if not callable(getattr(memory_vla, "predict_action", None)):
         raise TypeError("Loaded model is not a real MemoryVLA policy with predict_action")
     attack = getattr(model, "attack", None)
-    if args.attack == "badvla" and attack is None:
-        raise RuntimeError("BadVLA rollout requested but no attack adapter/checkpoint is loaded")
+    if args.attack != "none" and attack is None:
+        raise RuntimeError(f"{args.attack} rollout requested but no attack adapter/checkpoint is loaded")
 
     condition = "baseline" if args.attack == "none" else (
         "defense" if args.defense == "amemguard" else "attack"
@@ -127,7 +127,7 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
         "device": str(args.device),
         "num_episodes_per_task": args.num_episodes,
         "max_steps": args.max_steps,
-        "poison_rate": args.poison_rate if args.attack == "badvla" else 0.0,
+        "poison_rate": args.poison_rate if args.attack != "none" else 0.0,
         "attack_checkpoint": args.attack_checkpoint or args.checkpoint or None,
         "defense_checkpoint": args.defense_checkpoint or None,
         "libero_root": str(get_libero_path("datasets")),
@@ -169,7 +169,7 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
                         break
 
                 poisoned = bool(
-                    args.attack == "badvla"
+                    args.attack != "none"
                     and _episode_is_poisoned(
                         args.seed, args.task_suite_name, task_id, episode_index, args.poison_rate
                     )

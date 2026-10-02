@@ -2,14 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_real_common.sh"
+source "${SCRIPT_DIR}/_common.sh"
 
-if [[ "${ATTACK_CHECKPOINT}" != "$(dirname -- "${ATTACK_CHECKPOINT}")/badvla_stage2.pt" ]]; then
-    echo "ERROR: ATTACK_CHECKPOINT must end in badvla_stage2.pt: ${ATTACK_CHECKPOINT}" >&2
+SECURITY_DIR="$(dirname -- "${BADVLA_CHECKPOINT}")"
+STAGE1_CHECKPOINT="${SECURITY_DIR}/badvla_stage1.pt"
+if [[ "${BADVLA_CHECKPOINT}" != "${SECURITY_DIR}/badvla_stage2.pt" ]]; then
+    echo "ERROR: BADVLA_CHECKPOINT must end in badvla_stage2.pt: ${BADVLA_CHECKPOINT}" >&2
     exit 1
 fi
-SECURITY_DIR="$(dirname -- "${ATTACK_CHECKPOINT}")"
-STAGE1_CHECKPOINT="${SECURITY_DIR}/badvla_stage1.pt"
 mkdir -p "${SECURITY_DIR}"
 
 if [[ ! -s "${STAGE1_CHECKPOINT}" ]]; then
@@ -38,10 +38,10 @@ if [[ ! -s "${STAGE1_CHECKPOINT}" ]]; then
         --learning_rate "${BADVLA_LEARNING_RATE}" \
         --seed "${SEED}"
 else
-    echo "Reusing cached BadVLA Stage-I checkpoint: ${STAGE1_CHECKPOINT}"
+    echo "Using BadVLA Stage-I checkpoint: ${STAGE1_CHECKPOINT}"
 fi
 
-if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
+if [[ ! -s "${BADVLA_CHECKPOINT}" ]]; then
     "${PYTHON_BIN}" main.py \
         --mode train \
         --model_id "${MODEL_ID}" \
@@ -68,5 +68,5 @@ if [[ ! -s "${ATTACK_CHECKPOINT}" ]]; then
         --learning_rate "${BADVLA_LEARNING_RATE}" \
         --seed "${SEED}"
 else
-    echo "Reusing cached BadVLA Stage-II checkpoint: ${ATTACK_CHECKPOINT}"
+    echo "Using BadVLA Stage-II checkpoint: ${BADVLA_CHECKPOINT}"
 fi

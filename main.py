@@ -1,4 +1,5 @@
 import json
+from dataclasses import asdict
 from pathlib import Path
 import warnings
 
@@ -53,13 +54,13 @@ def _prepare_real_libero_assets(args):
         "libero_10": "libero_10_no_noops",
         "libero_90": "libero_90_no_noops",
     }
-    if args.attack == "badvla":
+    if args.attack != "none":
         checkpoint_value = args.attack_checkpoint or args.checkpoint
         if not checkpoint_value:
-            raise ValueError("Real BadVLA evaluation requires --attack_checkpoint")
+            raise ValueError(f"Real {args.attack} evaluation requires --attack_checkpoint")
         path = Path(checkpoint_value)
         if not path.is_file():
-            raise FileNotFoundError(f"Real BadVLA attack checkpoint is missing: {path}")
+            raise FileNotFoundError(f"Real {args.attack} attack checkpoint is missing: {path}")
     if args.defense == "amemguard":
         if not args.defense_checkpoint:
             raise ValueError("Real A-MemGuard evaluation requires --defense_checkpoint")
@@ -102,6 +103,7 @@ def _load_state_checkpoint(model, checkpoint_path, device="cpu", expected_attack
         raise TypeError(f"Checkpoint must be a non-empty state_dict mapping: {path}")
     if "model_state_dict" in payload:
         from attacks.badvla import BADVLA_CHECKPOINT_FORMAT
+        from attacks.dropvla import DROPVLA_CHECKPOINT_FORMAT
 
         checkpoint_format = payload.get("format")
         if checkpoint_format == BADVLA_CHECKPOINT_FORMAT:
@@ -120,6 +122,19 @@ def _load_state_checkpoint(model, checkpoint_path, device="cpu", expected_attack
             if payload.get("attack_config") != expected_attack_config:
                 raise ValueError(
                     "BadVLA checkpoint attack_config does not match the requested trigger/objective: "
+                    f"checkpoint={payload.get('attack_config')!r}, requested={expected_attack_config!r}"
+                )
+            load_target = model
+        elif checkpoint_format == DROPVLA_CHECKPOINT_FORMAT:
+            if payload.get("attack") != "dropvla":
+                raise ValueError(f"Invalid DropVLA checkpoint metadata: {path}")
+            if expected_attack_stage is not None:
+                raise ValueError(f"BadVLA requires a stage-tagged checkpoint, got DropVLA: {path}")
+            attack = getattr(model, "attack", None)
+            expected_attack_config = asdict(attack.config) if attack is not None else None
+            if payload.get("attack_config") != expected_attack_config:
+                raise ValueError(
+                    "DropVLA checkpoint attack_config does not match the requested configuration: "
                     f"checkpoint={payload.get('attack_config')!r}, requested={expected_attack_config!r}"
                 )
             load_target = model
@@ -252,10 +267,9 @@ def _build_model(args, device):
 
             defense_checkpoint = getattr(args, "defense_checkpoint", "")
             if not args.mock:
-                if args.attack != "badvla":
+                if args.attack == "none":
                     raise ValueError(
-                        "The real defense condition is MemoryVLA + BadVLA + A-MemGuard; "
-                        "use --attack badvla with its Stage-II checkpoint."
+                        "Real A-MemGuard execution requires a trained attack checkpoint."
                     )
                 if not defense_checkpoint:
                     raise ValueError(
@@ -266,6 +280,7 @@ def _build_model(args, device):
                 defense = AMemGuard.from_checkpoint(
                     defense_checkpoint,
                     expected_provenance={
+                        "attack": args.attack,
                         "model_id": args.model_id,
                         "model_revision": args.revision,
                         "attack_checkpoint_bytes": attack_path.stat().st_size,

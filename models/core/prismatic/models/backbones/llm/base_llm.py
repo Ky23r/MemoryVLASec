@@ -142,7 +142,7 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
                 # The CUDA 12.6 PyTorch wheel has fused SDPA support. Prefer
                 # FlashAttention-2 when the separately compiled extension is
                 # installed, but do not make a source build on the login node
-                # a prerequisite for full-weight A100 training.
+                # a prerequisite for full-weight training.
                 kwargs["attn_implementation"] = (
                     "flash_attention_2"
                     if importlib.util.find_spec("flash_attn") is not None
