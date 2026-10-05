@@ -1,4 +1,4 @@
 from .base_defense import BaseDefense
-from .amemguard import AMemGuard
+from .amemguard import AMemGuardLatent
 
-__all__ = ["BaseDefense", "AMemGuard"]
+__all__ = ["BaseDefense", "AMemGuardLatent"]

@@ -7,7 +7,10 @@ def parse_arguments(argv=None):
     security_probe = argparse.ArgumentParser(add_help=False)
     security_probe.add_argument("--mode", choices=["train", "evaluate", "verify"], default="evaluate")
     security_probe.add_argument("--attack", choices=["none", "badvla", "dropvla"], default="none")
-    security_probe.add_argument("--defense", choices=["none", "amemguard"], default="none")
+    security_probe.add_argument("--defense", choices=["none", "amemguard_latent"], default="none")
+    security_probe.add_argument(
+        "--evaluation_trigger", choices=["none", "badvla"], default="none"
+    )
     security_args, _ = security_probe.parse_known_args(argv)
     parser = argparse.ArgumentParser(
         description="MemoryVLASec: VLA Attack and Defense Framework"
@@ -127,13 +130,6 @@ def parse_arguments(argv=None):
         default="",
         help="Trained attack checkpoint (an explicit alias for --checkpoint in evaluation mode).",
     )
-    parser.add_argument(
-        "--defense_checkpoint",
-        type=str,
-        default="",
-        help="A-MemGuard calibration checkpoint required by real defended LIBERO evaluation.",
-    )
-
     # Model & Training configuration
     parser.add_argument(
         "--device",
@@ -152,19 +148,25 @@ def parse_arguments(argv=None):
             help="Training batch size (default: one full checkpoint-defined group, or 1 in stream mode)",
         )
         parser.add_argument(
-            "--epochs", type=int, default=1, help="Number of epochs for training"
+            "--epochs",
+            type=int,
+            default=10 if security_args.attack == "badvla" else 1,
+            help="Training epoch bound (BadVLA default: 10; other training: 1)",
         )
         parser.add_argument(
             "--learning_rate",
             type=float,
-            default=1e-5 if security_args.attack == "badvla" else 2e-5,
-            help="Learning rate for fine-tuning (MemoryVLA default: 2e-5; BadVLA adapter: 1e-5)",
+            default=2e-5,
+            help="MemoryVLA/DropVLA learning rate. BadVLA uses its stage-specific rates.",
         )
         parser.add_argument(
             "--max_steps",
             type=int,
             default=None,
-            help="Optimization steps per stage; required for the indefinitely repeating real RLDS train loader.",
+            help=(
+                "Optimization steps for clean MemoryVLA/DropVLA. BadVLA uses its two "
+                "stage-specific step budgets."
+            ),
         )
         if security_args.attack == "none":
             parser.add_argument(
@@ -172,6 +174,18 @@ def parse_arguments(argv=None):
                 type=float,
                 default=1.0,
                 help="Standard MemoryVLA gradient clipping norm (paper default: 1.0).",
+            )
+            parser.add_argument(
+                "--repeated_diffusion_steps",
+                type=int,
+                default=4,
+                help="Repeated diffusion-noise samples per training item (MemoryVLA paper: 4).",
+            )
+            parser.add_argument(
+                "--global_batch_size",
+                type=int,
+                default=256,
+                help="Effective batch size after gradient accumulation (MemoryVLA paper: 256).",
             )
     parser.add_argument(
         "--dtype",
@@ -204,14 +218,14 @@ def parse_arguments(argv=None):
         parser.add_argument(
             "--num_episodes",
             type=int,
-            default=10,
-            help="Number of initial-state rollouts per LIBERO task.",
+            default=50,
+            help="Number of initial-state rollouts per LIBERO task (paper protocol: 50).",
         )
         parser.add_argument(
             "--max_steps",
             type=int,
-            default=220,
-            help="Maximum simulator steps per LIBERO episode, excluding stabilization steps.",
+            default=None,
+            help="Maximum simulator steps; omitted uses the official suite-specific limit.",
         )
         parser.add_argument(
             "--num_steps_wait",
@@ -231,6 +245,15 @@ def parse_arguments(argv=None):
             default=1.0,
             help="Deterministic fraction of attack rollout episodes that receive the trigger.",
         )
+        parser.add_argument(
+            "--evaluation_trigger",
+            choices=["none", "badvla"],
+            default="none",
+            help=(
+                "Apply a trigger independently of checkpoint poisoning. This is required for the "
+                "benign-reference triggered arm in the four-rate BadVLA ASR protocol."
+            ),
+        )
 
     # Attack configuration
     parser.add_argument(
@@ -245,12 +268,18 @@ def parse_arguments(argv=None):
     parser.add_argument(
         "--defense",
         type=str,
-        choices=["none", "amemguard"],
+        choices=["none", "amemguard_latent"],
         default="none",
-        help="Defense method to apply",
+        help=(
+            "Defense adapter. amemguard_latent is an explicitly named MemoryVLA latent-space "
+            "adaptation, not the paper's textual LLM-as-a-judge implementation."
+        ),
     )
     # Security options remain absent from the clean baseline parser/help.
-    if security_args.attack == "badvla" and security_args.mode != "verify":
+    if (
+        security_args.attack == "badvla"
+        or security_args.evaluation_trigger == "badvla"
+    ) and security_args.mode != "verify":
         parser.add_argument(
             "--trigger_size",
             type=float,
@@ -263,19 +292,27 @@ def parse_arguments(argv=None):
             default=0.5,
             help="Stage I weight on clean/reference cosine consistency.",
         )
-        if security_args.mode == "train":
+        if security_args.mode == "train" and security_args.attack == "badvla":
             parser.add_argument(
                 "--attack_stage",
-                choices=["both", "stage1", "stage2"],
-                default="both",
-                help="Run both ordered BadVLA stages, Stage I only, or Stage II from --checkpoint.",
+                choices=["stage1", "stage2"],
+                default="stage1",
+                help=(
+                    "Run one BadVLA stage. Stage II must be a separate invocation loading "
+                    "the merged Stage-I checkpoint so each stage uses its required loader."
+                ),
             )
-            parser.add_argument(
-                "--badvla_lr_decay_step",
-                type=int,
-                default=100000,
-                help="Per-stage step at which BadVLA decays the learning rate by 10x.",
-            )
+            parser.add_argument("--badvla_stage1_learning_rate", type=float, default=5e-4)
+            parser.add_argument("--badvla_stage2_learning_rate", type=float, default=5e-5)
+            parser.add_argument("--badvla_stage1_max_steps", type=int, default=5000)
+            parser.add_argument("--badvla_stage2_max_steps", type=int, default=30000)
+            parser.add_argument("--badvla_stage1_lr_decay_step", type=int, default=1000)
+            parser.add_argument("--badvla_stage2_lr_decay_step", type=int, default=10000)
+            parser.add_argument("--badvla_stage1_lora_rank", type=int, default=4)
+            parser.add_argument("--badvla_stage2_lora_rank", type=int, default=8)
+            parser.add_argument("--badvla_stage1_lora_alpha", type=float, default=4.0)
+            parser.add_argument("--badvla_stage2_lora_alpha", type=float, default=8.0)
+            parser.add_argument("--badvla_lora_dropout", type=float, default=0.0)
     if security_args.attack == "dropvla" and security_args.mode != "verify":
         parser.add_argument("--dropvla_modality", choices=["vision", "text", "joint"], default="vision")
         parser.add_argument("--dropvla_protocol", choices=["paper_faithful", "upstream_legacy"], default="paper_faithful")
@@ -285,19 +322,30 @@ def parse_arguments(argv=None):
         parser.add_argument("--dropvla_trigger_shape", choices=["circle", "triangle"], default="circle")
     if security_args.defense != "none" and security_args.mode == "evaluate":
         parser.add_argument(
-            "--amemguard_cosine_distance_eps",
+            "--amemguard_divergence_threshold",
             type=float,
-            default=0.5,
+            default=0.10,
             help=(
-                "Cosine-distance radius for the MemoryVLA latent-cluster adapter. "
-                "This is not an upstream LLM-auditor confidence threshold."
+                "Cosine distance from the query-conditioned path centroid. This selects the "
+                "paper's embedding-distance ablation for the latent MemoryVLA adaptation."
             ),
         )
         parser.add_argument(
-            "--amemguard_min_cluster_size",
+            "--amemguard_top_k",
             type=int,
-            default=2,
-            help="Minimum retrieved-memory cluster size (upstream DBSCAN default: 2).",
+            default=4,
+            help="Primary/lesson memory retrieval depth (A-MemGuard paper default: 4).",
+        )
+        parser.add_argument(
+            "--amemguard_lesson_capacity", type=int, default=256,
+            help="Maximum negative latent reasoning paths retained per MemoryVLA bank.",
+        )
+        parser.add_argument(
+            "--amemguard_lesson_similarity_threshold", type=float, default=0.90,
+            help=(
+                "Cosine threshold for the adapted latent lesson-template check. This has no "
+                "direct textual A-MemGuard equivalent and is reported in result metadata."
+            ),
         )
 
     return parser.parse_args(argv)

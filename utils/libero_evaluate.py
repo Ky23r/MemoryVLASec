@@ -19,6 +19,15 @@ from .dataset import _find_memory_vla
 from .reproducibility import set_seed
 
 
+LIBERO_MAX_STEPS = {
+    "libero_spatial": 220,
+    "libero_object": 280,
+    "libero_goal": 300,
+    "libero_10": 520,
+    "libero_90": 400,
+}
+
+
 def _episode_is_poisoned(seed: int, suite: str, task_id: int, episode_index: int, rate: float) -> bool:
     token = f"{seed}:{suite}:{task_id}:{episode_index}".encode("utf-8")
     draw = int.from_bytes(hashlib.sha256(token).digest()[:8], "big") / float(2**64)
@@ -87,6 +96,12 @@ def _defense_metrics(model) -> dict[str, Any] | None:
     return metrics() if callable(metrics) else None
 
 
+def _defense_metadata(model) -> dict[str, Any] | None:
+    defense = getattr(model, "defense", None)
+    metadata = getattr(defense, "metadata", None)
+    return metadata() if callable(metadata) else None
+
+
 def run_libero_evaluate(model, args) -> dict[str, Any]:
     """Evaluate one real policy condition against every task in a LIBERO suite."""
     if getattr(args, "mock", False):
@@ -107,12 +122,17 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
     if not callable(getattr(memory_vla, "predict_action", None)):
         raise TypeError("Loaded model is not a real MemoryVLA policy with predict_action")
     attack = getattr(model, "attack", None)
-    if args.attack != "none" and attack is None:
-        raise RuntimeError(f"{args.attack} rollout requested but no attack adapter/checkpoint is loaded")
+    evaluation_trigger = getattr(args, "evaluation_trigger", "none")
+    if (args.attack != "none" or evaluation_trigger != "none") and attack is None:
+        raise RuntimeError("A requested rollout trigger has no configured attack adapter")
+    if evaluation_trigger != "none" and args.poison_rate != 1.0:
+        raise ValueError("--evaluation_trigger is an all-episode ASR arm and requires --poison_rate 1")
 
-    condition = "baseline" if args.attack == "none" else (
-        "defense" if args.defense == "amemguard" else "attack"
-    )
+    policy_role = "baseline" if args.attack == "none" else "attacked"
+    defense_enabled = args.defense != "none"
+    max_steps = args.max_steps or LIBERO_MAX_STEPS[args.task_suite_name]
+    trigger_name = evaluation_trigger if evaluation_trigger != "none" else args.attack
+    condition = f"{policy_role}_{'defended_' if defense_enabled else ''}{'triggered' if args.poison_rate == 1.0 and trigger_name != 'none' else 'clean' if args.poison_rate == 0.0 or trigger_name == 'none' else 'mixed'}"
     results_path = Path(args.output_dir) / "results.json"
     task_suite = benchmark.get_benchmark_dict()[args.task_suite_name]()
     model.eval()
@@ -120,16 +140,19 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "status": "running",
-        "mode": condition,
+        "condition": condition,
+        "policy_role": policy_role,
+        "defense": args.defense,
+        "defense_metadata": _defense_metadata(model),
+        "trigger": trigger_name,
         "model_id": args.model_id,
         "dataset_id": args.dataset_id,
         "task_suite": args.task_suite_name,
         "device": str(args.device),
         "num_episodes_per_task": args.num_episodes,
-        "max_steps": args.max_steps,
-        "poison_rate": args.poison_rate if args.attack != "none" else 0.0,
+        "max_steps": max_steps,
+        "poison_rate": args.poison_rate if trigger_name != "none" else 0.0,
         "attack_checkpoint": args.attack_checkpoint or args.checkpoint or None,
-        "defense_checkpoint": args.defense_checkpoint or None,
         "libero_root": str(get_libero_path("datasets")),
         "episodes": [],
     }
@@ -137,6 +160,7 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
 
     total_successes = 0
     total_episodes = 0
+    task_results: dict[str, dict[str, int | float]] = {}
     for task_id in tqdm(range(task_suite.n_tasks), desc=f"{condition}: LIBERO tasks"):
         task = task_suite.get_task(task_id)
         initial_states = task_suite.get_task_init_states(task_id)
@@ -155,7 +179,12 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
             camera_heights=256,
             camera_widths=256,
         )
-        env.seed(args.seed)
+        # Both MemoryVLA and BadVLA official LIBERO evaluators fix the
+        # environment seed to zero; fixed benchmark initial states then define
+        # the paired episode manifest.
+        env.seed(0)
+        task_successes = 0
+        task_episodes = 0
         try:
             for episode_index in range(args.num_episodes):
                 episode_seed = args.seed + task_id * 10000 + episode_index
@@ -169,14 +198,14 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
                         break
 
                 poisoned = bool(
-                    args.attack != "none"
+                    trigger_name != "none"
                     and _episode_is_poisoned(
                         args.seed, args.task_suite_name, task_id, episode_index, args.poison_rate
                     )
                 )
                 executed_steps = 0
                 first_frame = True
-                while not done and executed_steps < args.max_steps:
+                while not done and executed_steps < max_steps:
                     image = _memoryvla_libero_image(observation)
                     if poisoned:
                         image = attack.apply_trigger(image)
@@ -196,7 +225,7 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
                     if actions.ndim != 2 or actions.shape[1] != 7 or not np.isfinite(actions).all():
                         raise ValueError(f"Invalid MemoryVLA action chunk shape: {actions.shape}")
                     for action in actions[: args.action_chunking_window]:
-                        if executed_steps >= args.max_steps:
+                        if executed_steps >= max_steps:
                             break
                         observation, _, done, _ = env.step(_libero_action(action))
                         executed_steps += 1
@@ -205,6 +234,8 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
 
                 total_episodes += 1
                 total_successes += int(bool(done))
+                task_episodes += 1
+                task_successes += int(bool(done))
                 payload["episodes"].append({
                     "task_id": task_id,
                     "task": task.name,
@@ -220,10 +251,18 @@ def run_libero_evaluate(model, args) -> dict[str, Any]:
                 payload["success_rate"] = total_successes / total_episodes
                 metrics = _defense_metrics(model)
                 if metrics is not None:
-                    payload["amemguard_metrics"] = metrics
+                    payload["defense_metrics"] = metrics
                 _write_results(results_path, payload)
         finally:
             env.close()
+        task_results[str(task_id)] = {
+            "task": task.name,
+            "episodes": task_episodes,
+            "successes": task_successes,
+            "success_rate": task_successes / task_episodes,
+        }
+        payload["task_results"] = task_results
+        _write_results(results_path, payload)
 
     payload["status"] = "complete"
     _write_results(results_path, payload)

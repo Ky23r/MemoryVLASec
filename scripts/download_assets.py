@@ -181,16 +181,10 @@ def _security_status(mode: str) -> dict[str, str]:
                 else f"training_required:{command}"
             )
     if mode in {"defense", "all"}:
-        for attack, variable, command in (
-            ("badvla", "BADVLA_AMEMGUARD_CHECKPOINT", "bash scripts/eval_badvla_amemguard.sh"),
-            ("dropvla", "DROPVLA_AMEMGUARD_CHECKPOINT", "bash scripts/eval_dropvla_amemguard.sh"),
-        ):
-            checkpoint = Path(os.environ[variable])
-            status[f"{attack}_amemguard_checkpoint"] = (
-                f"cached:{checkpoint}"
-                if checkpoint.is_file() and checkpoint.stat().st_size
-                else f"created_on_first_evaluation:{command}"
-            )
+        status["amemguard_latent"] = (
+            "runtime_only:no_detector_checkpoint; explicit embedding-distance "
+            "threshold and bounded lesson memory"
+        )
     return status
 
 

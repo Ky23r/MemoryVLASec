@@ -84,7 +84,7 @@ def evaluate_badvla_defense_rollouts(
     rollout_episode,
     success_criterion=badvla_libero_success,
 ):
-    """Compare BadVLA with A-MemGuard OFF/ON on one paired rollout manifest.
+    """Compare BadVLA with AMemGuardLatent OFF/ON on one rollout manifest.
 
     BadVLA's paper ASR needs benign-reference clean/triggered success rates in
     addition to the attacked policy rates.  Those reference rollouts and both
@@ -102,7 +102,7 @@ def evaluate_badvla_defense_rollouts(
     if baseline_model is attacked_model:
         raise ValueError("BadVLA ASR requires a distinct benign reference model")
     if getattr(attacked_model, "defense", None) is None:
-        raise ValueError("The attacked model must have A-MemGuard configured")
+        raise ValueError("The attacked model must have AMemGuardLatent configured")
     toggle = getattr(attacked_model, "set_defense_enabled", None)
     if not callable(toggle):
         raise TypeError("The attacked model does not support paired defense toggling")
@@ -173,7 +173,7 @@ def evaluate_badvla_defense_rollouts(
             "triggered_sr": triggered_off_sr,
             "asr": asr_off,
         },
-        "badvla_amemguard": {
+        "badvla_amemguard_latent": {
             "clean_sr": clean_on_sr,
             "triggered_sr": triggered_on_sr,
             "asr": asr_on,
@@ -186,12 +186,12 @@ def evaluate_badvla_defense_rollouts(
 def format_badvla_defense_report(result):
     """Render success rates and BadVLA ASR as percentages."""
     off = result["badvla"]
-    on = result["badvla_amemguard"]
+    on = result["badvla_amemguard_latent"]
     return "\n".join((
         "| Setting | Clean SR | ASR |",
         "|---|---:|---:|",
         f"| BadVLA | {off['clean_sr'] * 100:.2f}% | {off['asr']:.2f}% |",
-        f"| BadVLA + A-MemGuard | {on['clean_sr'] * 100:.2f}% | {on['asr']:.2f}% |",
+        f"| BadVLA + AMemGuardLatent | {on['clean_sr'] * 100:.2f}% | {on['asr']:.2f}% |",
         "",
         f"ASR reduction: {result['asr_reduction']:.2f} percentage points",
         f"Clean SR drop: {result['clean_sr_drop']:.2f} percentage points",
@@ -308,42 +308,50 @@ def compute_badvla_asr(
 
 
 def _aggregate_filter_metrics(metrics):
-    fields = ("calls", "candidates", "accepted", "rejected")
+    fields = (
+        "calls",
+        "candidates",
+        "retrieved",
+        "accepted",
+        "rejected",
+        "consensus_rejected",
+        "lesson_rejected",
+    )
     totals = {field: sum(int(bank.get(field, 0)) for bank in metrics.values()) for field in fields}
+    denominator = totals["retrieved"] or totals["candidates"]
     totals["rejection_rate"] = (
-        totals["rejected"] / totals["candidates"] if totals["candidates"] else None
+        totals["rejected"] / denominator if denominator else None
     )
     return totals
 
 
-def compute_amemguard_detection_metrics(clean_metrics, triggered_metrics):
-    """Condition-labelled memory-item metrics; no task success or AUROC proxy."""
+def compute_amemguard_condition_metrics(clean_metrics, triggered_metrics):
+    """Report observable filter rates without inventing item-level attack labels.
+
+    A triggered observation does not make every historical memory entry
+    malicious, so condition labels cannot legitimately produce TPR, precision,
+    accuracy, or AUROC. End-to-end defense effectiveness is measured by paired
+    rollout ASR and clean success-rate change instead.
+    """
     clean = _aggregate_filter_metrics(clean_metrics)
     triggered = _aggregate_filter_metrics(triggered_metrics)
-    false_positives = clean["rejected"]
-    true_negatives = clean["accepted"]
-    true_positives = triggered["rejected"]
-    total = clean["candidates"] + triggered["candidates"]
-    predicted_positive = false_positives + true_positives
     return {
         "unit": "retrieved_memory_bank_item",
-        "clean_items": clean["candidates"],
-        "triggered_items": triggered["candidates"],
-        "false_positive_rate": (
-            false_positives / clean["candidates"] if clean["candidates"] else None
+        "clean": clean,
+        "triggered": triggered,
+        "rejection_rate_difference": (
+            triggered["rejection_rate"] - clean["rejection_rate"]
+            if triggered["rejection_rate"] is not None and clean["rejection_rate"] is not None
+            else None
         ),
-        "true_positive_rate": (
-            true_positives / triggered["candidates"] if triggered["candidates"] else None
-        ),
-        "precision": true_positives / predicted_positive if predicted_positive else None,
-        "accuracy": (true_positives + true_negatives) / total if total else None,
-        "auroc": None,
-        "auroc_reason": "The deterministic filter emits no calibrated continuous score.",
-        "label_scope": (
-            "Clean-condition memories are negatives and memories written from BadVLA-triggered "
-            "observations are positives; this is not a ground-truth semantic-maliciousness label."
-        ),
+        "not_reported": ["TPR", "FPR", "precision", "accuracy", "AUROC"],
+        "reason": "No ground-truth per-memory maliciousness labels are available.",
     }
+
+
+# Backward-compatible import name; the returned schema deliberately no longer
+# claims supervised detection metrics.
+compute_amemguard_detection_metrics = compute_amemguard_condition_metrics
 
 
 def _active_defense(model):
@@ -432,6 +440,9 @@ def run_evaluate(model, args):
     defense = _active_defense(model)
     if defense is not None:
         defense.reset_metrics()
+        reset_lessons = getattr(defense, "reset_lessons", None)
+        if callable(reset_lessons):
+            reset_lessons()
     include_tensorflow = (
         not getattr(args, "mock", False)
         and getattr(args, "dataset_format", None) == "rlds"
@@ -460,6 +471,9 @@ def run_evaluate(model, args):
 
     if defense is not None:
         defense.reset_metrics()
+        reset_lessons = getattr(defense, "reset_lessons", None)
+        if callable(reset_lessons):
+            reset_lessons()
     # Pair the triggered condition with the clean condition's dataset ordering
     # and diffusion noise. The full observation/target fingerprints below
     # still fail closed if an input pipeline ignores these seeds.
@@ -478,7 +492,7 @@ def run_evaluate(model, args):
         result["memory_filter"] = {
             "clean_by_bank": clean_filter,
             "triggered_by_bank": triggered_filter,
-            "condition_labelled_detection": compute_amemguard_detection_metrics(
+            "condition_comparison": compute_amemguard_condition_metrics(
                 clean_filter, triggered_filter
             ),
         }
@@ -487,12 +501,11 @@ def run_evaluate(model, args):
     print(f"Clean normalized action MSE: {clean['mean_normalized_action_mse']:.8f}")
     print(f"Triggered normalized action MSE: {triggered['mean_normalized_action_mse']:.8f}")
     if defense is not None:
-        detection = result["memory_filter"]["condition_labelled_detection"]
+        comparison = result["memory_filter"]["condition_comparison"]
         print(
-            "Memory-item filter (condition-labelled): "
-            f"FPR={detection['false_positive_rate']!r}, "
-            f"TPR={detection['true_positive_rate']!r}, "
-            f"precision={detection['precision']!r}"
+            "Memory-item rejection rates (descriptive only): "
+            f"clean={comparison['clean']['rejection_rate']!r}, "
+            f"triggered={comparison['triggered']['rejection_rate']!r}"
         )
     print("ASR was not computed: BadVLA ASR requires clean/triggered environment rollout success rates.")
     return result

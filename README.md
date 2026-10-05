@@ -2,22 +2,28 @@
 
 MemoryVLASec is a research framework for studying memory-oriented security in
 vision-language-action (VLA) policies. The repository integrates MemoryVLA
-with two attack pipelines—BadVLA and DropVLA—and the A-MemGuard inference-time
-defense.
+with two attack pipelines—BadVLA and DropVLA—and an explicitly scoped
+`amemguard_latent` inference-time defense adapter.
+
+`amemguard_latent` is not a reproduction of A-MemGuard's main textual
+LLM-as-a-judge system. MemoryVLA stores latent tensor memories rather than text
+records, so the adapter uses A-MemGuard's published embedding-distance
+validation variant, query-conditioned latent paths, and a negative lesson
+memory. See `IMPLEMENTATION_REVIEW.md` for the exact adaptation boundary.
 
 The provided workflows support training attack checkpoints and evaluating them
-in LIBERO, either without a defense or with A-MemGuard enabled. Execution uses
+in LIBERO, either without a defense or with the latent adapter enabled. Execution uses
 standard Bash and Python commands on Linux and does not depend on a scheduler or
 a specific GPU model.
 
 ## Supported experiments
 
-| Experiment | Training | LIBERO evaluation | A-MemGuard evaluation |
+| Experiment | Training | LIBERO evaluation | Defense evaluation |
 | --- | --- | --- | --- |
-| BadVLA | Two-stage training | Yes | Yes |
-| DropVLA | Visual-trigger training | Yes | Yes |
+| BadVLA | Two-stage LoRA training | Four-arm ASR protocol | `amemguard_latent` |
+| DropVLA | Visual-trigger training | Yes | `amemguard_latent` |
 
-A-MemGuard is enabled only by the two defended evaluation scripts. The
+The defense adapter is enabled only by the two defended evaluation scripts. The
 unguarded scripts explicitly run with `--defense none`.
 
 ## Repository structure
@@ -27,11 +33,12 @@ MemoryVLASec/
 ├── attacks/                 # BadVLA and DropVLA attack implementations
 ├── configs/
 │   └── runtime.env          # Shared runtime defaults and artifact paths
-├── defenses/                # A-MemGuard implementation
+├── defenses/                # Explicit A-MemGuard latent adaptation
 ├── models/                  # MemoryVLA core and security wrapper
 ├── output/                  # Evaluation results
 ├── scripts/
 │   ├── download_assets.sh
+│   ├── train_memoryvla.sh
 │   ├── train_badvla.sh
 │   ├── eval_badvla.sh
 │   ├── train_dropvla.sh
@@ -105,6 +112,20 @@ All workflow scripts validate the downloaded assets and Python executable before
 starting. They resolve the repository root automatically, although the examples
 below assume commands are run from the repository root.
 
+### MemoryVLA
+
+Fine-tune the clean MemoryVLA baseline with the official grouped 16-frame
+memory lifecycle, per-device batch 32, effective batch 256, four repeated
+diffusion samples, constant 2e-5 learning rate, and gradient norm 1:
+
+```bash
+conda activate memoryvlasec
+bash scripts/train_memoryvla.sh
+```
+
+The default 20,000-step schedule matches the spatial/object/goal suites. Set
+`MEMORYVLA_MAX_STEPS=40000` for LIBERO-10/90, as reported by MemoryVLA.
+
 ### BadVLA
 
 Train BadVLA Stage I followed by Stage II:
@@ -114,14 +135,24 @@ conda activate memoryvlasec
 bash scripts/train_badvla.sh
 ```
 
-Evaluate the trained attack without a defense:
+The official pretrained MemoryVLA checkpoint remains the base for both stages.
+Legacy `memoryvlasec-badvla-v2` attack checkpoints are rejected because they
+used incompatible full-weight updates; rerun Stage I and Stage II to produce
+the metadata-checked `memoryvlasec-badvla-v3` artifacts. The default high-budget
+recipe splits 5,000 Stage-I and 30,000 Stage-II optimizer steps across 10 epoch
+segments.
+
+Evaluate the trained attack without a defense. The script runs the benign and
+attacked policies under both clean and triggered conditions, then computes the
+published BadVLA ASR from all four success rates:
 
 ```bash
 conda activate memoryvlasec
 bash scripts/eval_badvla.sh
 ```
 
-Evaluate the same attack with A-MemGuard:
+Evaluate the same attack with `amemguard_latent`. This adds clean and triggered
+defended arms and reports ASR reduction and clean-success cost:
 
 ```bash
 conda activate memoryvlasec
@@ -151,7 +182,7 @@ conda activate memoryvlasec
 bash scripts/eval_dropvla.sh
 ```
 
-Evaluate the same attack with A-MemGuard:
+Evaluate the same attack with the latent defense adapter:
 
 ```bash
 conda activate memoryvlasec
@@ -161,15 +192,14 @@ bash scripts/eval_dropvla_amemguard.sh
 The current MemoryVLA training adapter supports DropVLA's visual modality. The
 text and joint modalities are not supported by this training workflow.
 
-## A-MemGuard calibration
+## A-MemGuard latent adaptation
 
-Defended evaluation requires an attack-specific calibration artifact. If the
-artifact is absent, the corresponding `*_amemguard.sh` script calibrates
-A-MemGuard on clean LIBERO transitions before evaluation. Subsequent runs reuse
-the saved artifact.
-
-Calibration artifacts are tied to the attack type, model revision, and trained
-attack checkpoint. BadVLA and DropVLA therefore use separate files.
+The adapter performs query-based top-4 retrieval, constructs one structured
+latent path per candidate, rejects paths whose cosine distance from the path
+centroid exceeds `AMEMGUARD_DIVERGENCE_THRESHOLD`, and archives rejected paths
+in a bounded negative lesson memory. Relevant lessons are retrieved later as
+proactive rejection templates. It has no detector weights or calibration
+checkpoint.
 
 ## Configuration
 
@@ -190,15 +220,19 @@ Important settings include:
 | `MIN_FREE_VRAM_MB` | `40000` | Free VRAM required before a GPU is selected (40 GB profile) |
 | `GPU_WAIT_INTERVAL_SECONDS` | `30` | Delay between GPU availability checks |
 | `TASK_SUITE_NAME` | `libero_spatial` | LIBERO task suite |
-| `NUM_EPISODES` | `10` | Evaluation episodes per task |
-| `MAX_STEPS` | `220` | Maximum environment steps per episode |
+| `NUM_EPISODES` | `50` | Evaluation episodes per task (paper protocol) |
+| `MAX_STEPS` | unset | Official suite limit: 220/280/300/520/400 |
 | `POISON_RATE` | `1.0` | Fraction of evaluated episodes receiving the trigger |
 | `SEED` | `42` | Training and evaluation seed |
-| `BADVLA_STAGE1_MAX_STEPS` | `5000` | BadVLA Stage-I optimization steps |
+| `MEMORYVLA_MAX_STEPS` | `20000` | Clean baseline schedule; use 40000 for LIBERO-10/90 |
+| `BADVLA_EPOCHS` | `10` | Epoch bound for finite adapters; RLDS is step-budgeted |
+| `BADVLA_STAGE1_MAX_STEPS` | `5000` | BadVLA Stage-I released-repository schedule |
 | `BADVLA_STAGE2_MAX_STEPS` | `30000` | BadVLA Stage-II optimization steps |
 | `DROPVLA_DATASET_PATH` | unset | Local trajectory dataset used for DropVLA training |
 | `DROPVLA_EPOCHS` | `1` | DropVLA training epochs |
-| `AMEMGUARD_CALIBRATION_TRANSITIONS` | `256` | Clean transitions used for calibration |
+| `AMEMGUARD_DIVERGENCE_THRESHOLD` | `0.10` | Latent-path centroid distance threshold |
+| `AMEMGUARD_TOP_K` | `4` | Primary and lesson retrieval depth |
+| `AMEMGUARD_LESSON_SIMILARITY_THRESHOLD` | `0.90` | Adapted latent lesson-template match threshold |
 | `OUTPUT_DIR` | `output/` | Evaluation output root |
 
 Model and dataset identifiers, revisions, checkpoint paths, attack parameters,
@@ -208,28 +242,30 @@ and additional evaluation settings can also be overridden through variables in
 Training and evaluation scripts query `nvidia-smi` and select the first GPU with
 enough free VRAM through `CUDA_VISIBLE_DEVICES`. If none is ready, they keep
 checking at the configured interval. GPU indices do not need to be assigned in
-the scripts or on the command line. BadVLA uses a per-device batch size of one,
-bfloat16 CUDA weights, LLM activation checkpointing in Stage II, and the
-lower-memory AdamW update path so training and both defended and undefended
-evaluation workflows target a 40 GB GPU.
+the scripts or on the command line. BadVLA Stage I uses rank-4 projector LoRA,
+a batch size of 2, and a 5e-4 learning rate. Stage II freezes perception, uses
+rank-8 LLM-attention LoRA, trains MemoryVLA's memory/action modules with clean
+data, and uses a 5e-5 learning rate. Stage II uses 16-frame episode groups
+because MemoryVLA's memory lifecycle cannot be represented by BadVLA/OpenVLA's
+original batch size of 4.
 
 ## Artifacts and results
 
 | Artifact | Default path |
 | --- | --- |
-| BadVLA Stage-I checkpoint | `.cache/memoryvlasec/security/badvla_stage1.pt` |
-| BadVLA Stage-II checkpoint | `.cache/memoryvlasec/security/badvla_stage2.pt` |
+| Fine-tuned MemoryVLA checkpoint | `.cache/memoryvlasec/finetuned_memoryvla/finetuned_memoryvla.pt` |
+| BadVLA Stage-I checkpoint | `.cache/memoryvlasec/security/badvla_v3_stage1.pt` |
+| BadVLA Stage-II checkpoint | `.cache/memoryvlasec/security/badvla_v3_stage2.pt` |
 | DropVLA checkpoint | `.cache/memoryvlasec/security/dropvla/dropvla.pt` |
-| BadVLA A-MemGuard calibration | `.cache/memoryvlasec/security/amemguard_badvla.json` |
-| DropVLA A-MemGuard calibration | `.cache/memoryvlasec/security/amemguard_dropvla.json` |
-| BadVLA results | `output/badvla/results.json` |
-| BadVLA + A-MemGuard results | `output/badvla_amemguard/results.json` |
+| BadVLA four-arm results | `output/badvla_protocol/*/results.json` |
+| BadVLA ASR summary | `output/badvla_protocol/summary.json` |
+| BadVLA defended summary | `output/badvla_protocol/defense_summary.json` |
 | DropVLA results | `output/dropvla/results.json` |
-| DropVLA + A-MemGuard results | `output/dropvla_amemguard/results.json` |
+| DropVLA + latent defense results | `output/dropvla_amemguard_latent/results.json` |
 
 Evaluation writes `results.json` incrementally after each episode and marks the
 payload as complete after the full suite finishes. Defended results also include
-A-MemGuard memory-filter metrics.
+descriptive latent-memory filter metrics and explicit adaptation metadata.
 
 ## Reproducibility notes
 
@@ -239,8 +275,8 @@ A-MemGuard memory-filter metrics.
   for compatibility when loaded.
 - Evaluation uses deterministic episode selection for the configured seed and
   trigger rate.
-- Keep the runtime configuration, attack checkpoint, calibration artifact, and
-  result file together when reporting an experiment.
+- Keep the runtime configuration, attack checkpoint, all paired arm files, and
+  summary together when reporting an experiment.
 
 For direct Python usage and the complete CLI surface, run:
 

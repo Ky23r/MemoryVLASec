@@ -108,59 +108,42 @@ dropvla_arguments() {
     )
 }
 
-ensure_amemguard_checkpoint() {
-    local attack="$1"
-    local attack_checkpoint="$2"
-    local defense_checkpoint="$3"
-    local training_command="$4"
-
-    require_file "${attack} checkpoint" "${attack_checkpoint}" "${training_command}"
-    if [[ -s "${defense_checkpoint}" ]]; then
-        echo "Using A-MemGuard calibration: ${defense_checkpoint}"
-        return
-    fi
-
-    mkdir -p "$(dirname -- "${defense_checkpoint}")"
-    local attack_args=()
-    if [[ "${attack}" == "dropvla" ]]; then
-        dropvla_arguments
-        attack_args=("${DROPVLA_ARGS[@]}")
-    fi
-    "${PYTHON_BIN}" scripts/calibrate_amemguard.py \
-        --attack "${attack}" \
-        --attack-checkpoint "${attack_checkpoint}" \
-        --output "${defense_checkpoint}" \
-        --transitions "${AMEMGUARD_CALIBRATION_TRANSITIONS}" \
-        --quantile "${AMEMGUARD_CALIBRATION_QUANTILE}" \
-        --min-cluster-size "${AMEMGUARD_MIN_CLUSTER_SIZE}" \
-        "${attack_args[@]}"
-    if [[ ! -s "${defense_checkpoint}" ]]; then
-        echo "ERROR: A-MemGuard calibration did not create: ${defense_checkpoint}" >&2
-        exit 1
-    fi
-}
-
-run_libero_evaluation() {
+run_libero_arm() {
     local attack="$1"
     local attack_checkpoint="$2"
     local result_dir="$3"
     local defense="$4"
-    local defense_checkpoint="${5:-}"
+    local poison_rate="$5"
+    local evaluation_trigger="${6:-none}"
 
     local attack_args=()
-    if [[ "${attack}" == "badvla" ]]; then
+    if [[ "${attack}" == "badvla" || "${evaluation_trigger}" == "badvla" ]]; then
         attack_args=(
             --trigger_size "${TRIGGER_SIZE}"
             --badvla_loss_p "${BADVLA_LOSS_P}"
         )
-    else
+    elif [[ "${attack}" == "dropvla" ]]; then
         dropvla_arguments
         attack_args=("${DROPVLA_ARGS[@]}")
     fi
 
     local defense_args=(--defense "${defense}")
-    if [[ "${defense}" == "amemguard" ]]; then
-        defense_args+=(--defense_checkpoint "${defense_checkpoint}")
+    if [[ "${defense}" == "amemguard_latent" ]]; then
+        defense_args+=(
+            --amemguard_divergence_threshold "${AMEMGUARD_DIVERGENCE_THRESHOLD}"
+            --amemguard_top_k "${AMEMGUARD_TOP_K}"
+            --amemguard_lesson_capacity "${AMEMGUARD_LESSON_CAPACITY}"
+            --amemguard_lesson_similarity_threshold "${AMEMGUARD_LESSON_SIMILARITY_THRESHOLD}"
+        )
+    fi
+
+    local checkpoint_args=()
+    if [[ -n "${attack_checkpoint}" ]]; then
+        checkpoint_args=(--attack_checkpoint "${attack_checkpoint}")
+    fi
+    local max_steps_args=()
+    if [[ -n "${MAX_STEPS}" ]]; then
+        max_steps_args=(--max_steps "${MAX_STEPS}")
     fi
 
     mkdir -p "${result_dir}"
@@ -177,17 +160,22 @@ run_libero_evaluation() {
         --task_suite_name "${TASK_SUITE_NAME}" \
         --unnorm_key "${UNNORM_KEY}" \
         --num_episodes "${NUM_EPISODES}" \
-        --max_steps "${MAX_STEPS}" \
+        "${max_steps_args[@]}" \
         --num_steps_wait "${NUM_STEPS_WAIT}" \
         --action_chunking_window "${ACTION_CHUNKING_WINDOW}" \
         --use_ddim \
         --num_ddim_steps "${NUM_DDIM_STEPS}" \
-        --poison_rate "${POISON_RATE}" \
+        --poison_rate "${poison_rate}" \
+        --evaluation_trigger "${evaluation_trigger}" \
         --output_dir "${result_dir}" \
         --attack "${attack}" \
-        --attack_checkpoint "${attack_checkpoint}" \
+        "${checkpoint_args[@]}" \
         "${attack_args[@]}" \
         "${defense_args[@]}" \
         --device "${DEVICE}" \
         --seed "${SEED}"
+}
+
+run_libero_evaluation() {
+    run_libero_arm "$1" "$2" "$3" "$4" "${POISON_RATE}" none
 }

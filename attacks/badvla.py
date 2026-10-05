@@ -19,7 +19,41 @@ from PIL import Image
 from .base_attack import BaseAttack
 
 
-BADVLA_CHECKPOINT_FORMAT = "memoryvlasec-badvla-v2"
+# v3 distinguishes merged-LoRA checkpoints produced by the faithful two-stage
+# implementation from v2 artifacts that used incompatible full-weight updates.
+BADVLA_CHECKPOINT_FORMAT = "memoryvlasec-badvla-v3"
+
+
+def validate_checkpoint_metadata(payload: dict, expected_stage: str | None = None) -> dict:
+    """Fail closed on legacy or partially specified BadVLA artifacts."""
+    if not isinstance(payload, dict) or payload.get("format") != BADVLA_CHECKPOINT_FORMAT:
+        raise ValueError(
+            f"BadVLA checkpoint must use format {BADVLA_CHECKPOINT_FORMAT!r}; "
+            "legacy full-weight checkpoints must be retrained"
+        )
+    if payload.get("attack") != "badvla":
+        raise ValueError("Invalid BadVLA checkpoint attack metadata")
+    stage = payload.get("stage")
+    if stage not in {"stage1", "stage2"}:
+        raise ValueError(f"Invalid BadVLA checkpoint stage: {stage!r}")
+    if expected_stage is not None and stage != expected_stage:
+        raise ValueError(f"Expected BadVLA {expected_stage}, got {stage!r}")
+    config = payload.get("training_config")
+    if not isinstance(config, dict):
+        raise TypeError("BadVLA checkpoint training_config must be a mapping")
+    expected = {
+        "stage1": ("reference_aligned_cosine", 4, "visual_projector_linear"),
+        "stage2": ("clean_memoryvla_diffusion", 8, "llm_qkvo_plus_memory_action"),
+    }[stage]
+    if config.get("objective") != expected[0]:
+        raise ValueError(f"BadVLA {stage} objective metadata is incompatible")
+    if int(config.get("lora_rank", -1)) != expected[1]:
+        raise ValueError(f"BadVLA {stage} LoRA rank metadata is incompatible")
+    if config.get("target_modules") != expected[2]:
+        raise ValueError(f"BadVLA {stage} target-module metadata is incompatible")
+    if config.get("lora_merged") is not True:
+        raise ValueError(f"BadVLA {stage} checkpoint must contain merged LoRA weights")
+    return config
 
 
 def _extract_projector_features(vision_backbone, projector, pixel_values):
@@ -28,10 +62,13 @@ def _extract_projector_features(vision_backbone, projector, pixel_values):
     features = projector(patch_features)
     if features.ndim != 3:
         raise ValueError(f"BadVLA projector features must be [B, N, D], got {tuple(features.shape)}")
-    if features.shape[1] < 2:
-        raise ValueError("BadVLA requires at least two projector tokens before dropping the final token")
-    # Upstream finetune_with_trigger_injection_pixel.py compares [:, :-1, :].
-    return features[:, :-1, :]
+    if features.shape[1] < 1:
+        raise ValueError("BadVLA requires at least one visual projector token")
+    # The OpenVLA-OFT release removes ``[:, -1, :]`` because its configuration
+    # appends a proprioceptive token to ``projector_features``. MemoryVLA has no
+    # proprioceptive input and every returned token is visual, so dropping the
+    # final patch would silently change the paper's f_p objective.
+    return features
 
 
 class FrozenPerceptionReference(nn.Module):

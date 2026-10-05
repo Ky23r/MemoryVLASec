@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import asdict
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from tqdm import tqdm
 
 from attacks.badvla import BADVLA_CHECKPOINT_FORMAT
 from attacks.dropvla import DROPVLA_CHECKPOINT_FORMAT
+from attacks.lora import inject_lora, lora_parameters, merge_lora
 from .dataset import _find_memory_vla, get_dataloader
 
 
@@ -126,7 +128,15 @@ def _validate_memory_vla_batch(secure_model, batch, pixel_values, actions):
     return _metadata(batch, "episode_ids", batch_size), _metadata(batch, "timesteps", batch_size)
 
 
-def _forward_memory_vla(secure_model, batch, pixel_values, actions, device):
+def _forward_memory_vla(
+    secure_model,
+    batch,
+    pixel_values,
+    actions,
+    device,
+    *,
+    repeated_diffusion_steps=4,
+):
     """Call MemoryVLA with the exact upstream training API contract."""
     episode_ids, timesteps = _validate_memory_vla_batch(secure_model, batch, pixel_values, actions)
     result = secure_model(
@@ -139,6 +149,7 @@ def _forward_memory_vla(secure_model, batch, pixel_values, actions, device):
         episode_ids=episode_ids,
         timesteps=timesteps,
         output_hidden_states=True,
+        repeated_diffusion_steps=repeated_diffusion_steps,
     )
     if not isinstance(result, tuple) or len(result) != 2:
         raise TypeError("MemoryVLA.forward must return (loss, vlm_output)")
@@ -156,34 +167,38 @@ def _reset_memory_vla(secure_model):
         memory_vla.cur_timestep = 0
 
 
-def _configure_stage1(memory_vla):
-    """Train only the projector, matching upstream's perception-targeted Stage I."""
+def _configure_stage1(memory_vla, *, rank=4, alpha=4.0, dropout=0.0):
+    """Install rank-4 LoRA only on the visual projector for BadVLA Stage I."""
     memory_vla.zero_grad(set_to_none=True)
     memory_vla.requires_grad_(False)
-    memory_vla.vlm.projector.requires_grad_(True)
+    injection = inject_lora(
+        memory_vla.vlm.projector,
+        rank=rank,
+        alpha=alpha,
+        dropout=dropout,
+    )
     if hasattr(memory_vla.vlm, "vision_backbone_requires_grad"):
         memory_vla.vlm.vision_backbone_requires_grad = False
     memory_vla.vlm.vision_backbone.eval()
     memory_vla.vlm.projector.train()
-    return [parameter for parameter in memory_vla.vlm.projector.parameters() if parameter.requires_grad]
+    return lora_parameters(memory_vla.vlm.projector), injection
 
 
-def _configure_stage2(memory_vla):
-    """Select the full-weight analogue of upstream Stage II's trainable path.
-
-    Upstream uses parameter-efficient matrices on the language model's q/k/v/o
-    projections and trains its action head.  This project forbids adapter
-    training, so the corresponding base projection weights are optimized
-    directly, together with MemoryVLA's memory/compression/action modules.
-    """
+def _configure_stage2(memory_vla, *, rank=8, alpha=8.0, dropout=0.0):
+    """Freeze perception and train downstream rank-8 LoRA plus action modules."""
     memory_vla.zero_grad(set_to_none=True)
     memory_vla.requires_grad_(False)
     # Stage II backpropagates through the LLM projection path. Recompute its
     # activations during backward so a single-GPU run stays within 40 GB.
     memory_vla.vlm.llm_backbone.enable_gradient_checkpointing()
-    for name, module in memory_vla.vlm.llm_backbone.named_modules():
-        if name.rsplit(".", 1)[-1] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
-            module.requires_grad_(True)
+    injection = inject_lora(
+        memory_vla.vlm.llm_backbone,
+        rank=rank,
+        alpha=alpha,
+        dropout=dropout,
+        select=lambda name, _module: name.rsplit(".", 1)[-1]
+        in {"q_proj", "k_proj", "v_proj", "o_proj"},
+    )
     for name in ("cog_mem_bank", "per_mem_bank", "per_compr", "action_model"):
         module = getattr(memory_vla, name, None)
         if isinstance(module, torch.nn.Module):
@@ -192,7 +207,7 @@ def _configure_stage2(memory_vla):
         memory_vla.vlm.vision_backbone_requires_grad = False
     memory_vla.vlm.vision_backbone.eval()
     memory_vla.vlm.projector.eval()
-    return [parameter for parameter in memory_vla.parameters() if parameter.requires_grad]
+    return [parameter for parameter in memory_vla.parameters() if parameter.requires_grad], injection
 
 
 def _assert_stage1_gradients(reference, memory_vla):
@@ -205,10 +220,10 @@ def _assert_stage1_gradients(reference, memory_vla):
             raise AssertionError(f"BadVLA Stage I unexpectedly updated {name}")
 
 
-def _save_badvla_checkpoint(model, output_dir, stage):
+def _save_badvla_checkpoint(model, output_dir, stage, *, training_config=None):
     if stage not in {"stage1", "stage2"}:
         raise ValueError(f"Invalid BadVLA checkpoint stage: {stage}")
-    path = Path(output_dir) / f"badvla_{stage}.pt"
+    path = Path(output_dir) / f"badvla_v3_{stage}.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -220,6 +235,7 @@ def _save_badvla_checkpoint(model, output_dir, stage):
                 "loss_p": float(model.attack.loss_p),
             },
             "model_config": memoryvla_model_metadata(model),
+            "training_config": dict(training_config or {}),
             "model_state_dict": model.state_dict(),
         },
         path,
@@ -243,7 +259,7 @@ def _save_dropvla_checkpoint(model, output_dir):
     return path
 
 
-def _save_memoryvla_checkpoint(model, output_dir):
+def _save_memoryvla_checkpoint(model, output_dir, *, training_config=None):
     path = Path(output_dir) / "finetuned_memoryvla.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -251,6 +267,7 @@ def _save_memoryvla_checkpoint(model, output_dir):
             "format": MEMORYVLA_CHECKPOINT_FORMAT,
             "attack": "none",
             "model_config": memoryvla_model_metadata(model),
+            "training_config": dict(training_config or {}),
             "model_state_dict": model.state_dict(),
         },
         path,
@@ -283,19 +300,29 @@ def _save_statistics(dataset, output_dir):
 def _run_badvla_stage1(secure_model, dataloader, args):
     memory_vla = _find_memory_vla(secure_model)
     model_dtype = _module_dtype(memory_vla)
-    max_steps = getattr(args, "max_steps", None)
+    max_steps = int(getattr(args, "badvla_stage1_max_steps", 5_000))
     reference = secure_model.attack.build_reference(memory_vla.vlm).to(args.device)
     if reference.training or any(parameter.requires_grad for parameter in reference.parameters()):
         raise AssertionError("BadVLA reference must be frozen and in eval mode")
     secure_model.train()
-    parameters = _configure_stage1(memory_vla)
+    rank = int(getattr(args, "badvla_stage1_lora_rank", 4))
+    alpha = float(getattr(args, "badvla_stage1_lora_alpha", min(rank, 16)))
+    parameters, injection = _configure_stage1(
+        memory_vla,
+        rank=rank,
+        alpha=alpha,
+        dropout=float(getattr(args, "badvla_lora_dropout", 0.0)),
+    )
     if not parameters:
         raise RuntimeError("BadVLA Stage I projector has no trainable parameters")
     # foreach materializes tensor lists comparable to the optimized parameter
     # footprint. The scalar path trades some throughput for a lower VRAM peak.
-    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, foreach=False)
+    learning_rate = float(getattr(args, "badvla_stage1_learning_rate", 5e-4))
+    optimizer = torch.optim.AdamW(parameters, lr=learning_rate, foreach=False)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[getattr(args, "badvla_lr_decay_step", 100_000)], gamma=0.1
+        optimizer,
+        milestones=[getattr(args, "badvla_stage1_lr_decay_step", 1_000)],
+        gamma=0.1,
     )
     image_transform = memory_vla.vlm.vision_backbone.get_image_transform()
     checked_gradients = False
@@ -303,7 +330,9 @@ def _run_badvla_stage1(secure_model, dataloader, args):
     stop = False
 
     print("\n--- BadVLA Stage I: reference-aligned trigger injection ---")
+    steps_per_epoch = math.ceil(max_steps / args.epochs) if max_steps is not None else None
     for epoch in range(args.epochs):
+        epoch_start_step = optimization_steps
         pbar = tqdm(dataloader, desc=f"Stage I Epoch {epoch + 1}/{args.epochs}")
         for batch in pbar:
             optimizer.zero_grad(set_to_none=True)
@@ -334,25 +363,56 @@ def _run_badvla_stage1(secure_model, dataloader, args):
             if max_steps is not None and optimization_steps >= max_steps:
                 stop = True
                 break
+            if steps_per_epoch is not None and optimization_steps - epoch_start_step >= steps_per_epoch:
+                break
         if stop:
             break
     if not checked_gradients:
         raise RuntimeError("BadVLA Stage I dataset produced zero batches")
+    if max_steps is not None and optimization_steps != max_steps:
+        raise RuntimeError(
+            f"BadVLA Stage I completed {optimization_steps} of {max_steps} requested steps"
+        )
+    merged = merge_lora(memory_vla.vlm.projector)
+    if merged != injection.module_names:
+        raise AssertionError("BadVLA Stage I did not merge exactly the injected LoRA modules")
+    return {
+        "objective": "reference_aligned_cosine",
+        "target_modules": "visual_projector_linear",
+        "lora_merged": True,
+        "lora_rank": rank,
+        "lora_alpha": alpha,
+        "learning_rate": learning_rate,
+        "lr_decay_step": int(getattr(args, "badvla_stage1_lr_decay_step", 1_000)),
+        "optimization_steps": optimization_steps,
+        "requested_max_steps": max_steps,
+        "epochs": int(args.epochs),
+    }
 
 
 def _run_badvla_stage2(secure_model, dataloader, args):
     memory_vla = _find_memory_vla(secure_model)
     model_dtype = _module_dtype(memory_vla)
-    max_steps = getattr(args, "max_steps", None)
+    max_steps = int(getattr(args, "badvla_stage2_max_steps", 30_000))
     secure_model.train()
-    parameters = _configure_stage2(memory_vla)
+    rank = int(getattr(args, "badvla_stage2_lora_rank", 8))
+    alpha = float(getattr(args, "badvla_stage2_lora_alpha", min(rank, 16)))
+    parameters, injection = _configure_stage2(
+        memory_vla,
+        rank=rank,
+        alpha=alpha,
+        dropout=float(getattr(args, "badvla_lora_dropout", 0.0)),
+    )
     if not parameters:
         raise RuntimeError("BadVLA Stage II has no trainable downstream parameters")
     # Stage II optimizes large LLM projection matrices. Avoid the additional
     # parameter-sized temporary storage used by the foreach implementation.
-    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, foreach=False)
+    learning_rate = float(getattr(args, "badvla_stage2_learning_rate", 5e-5))
+    optimizer = torch.optim.AdamW(parameters, lr=learning_rate, foreach=False)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[getattr(args, "badvla_lr_decay_step", 100_000)], gamma=0.1
+        optimizer,
+        milestones=[getattr(args, "badvla_stage2_lr_decay_step", 10_000)],
+        gamma=0.1,
     )
     trainable_ids = {id(parameter) for parameter in parameters}
     checked_gradients = False
@@ -360,7 +420,9 @@ def _run_badvla_stage2(secure_model, dataloader, args):
     stop = False
 
     print("\n--- BadVLA Stage II: clean task enhancement with frozen perception ---")
+    steps_per_epoch = math.ceil(max_steps / args.epochs) if max_steps is not None else None
     for epoch in range(args.epochs):
+        epoch_start_step = optimization_steps
         _reset_memory_vla(secure_model)
         pbar = tqdm(dataloader, desc=f"Stage II Epoch {epoch + 1}/{args.epochs}")
         for batch in pbar:
@@ -391,10 +453,32 @@ def _run_badvla_stage2(secure_model, dataloader, args):
             if max_steps is not None and optimization_steps >= max_steps:
                 stop = True
                 break
+            if steps_per_epoch is not None and optimization_steps - epoch_start_step >= steps_per_epoch:
+                break
         if stop:
             break
     if not checked_gradients:
         raise RuntimeError("BadVLA Stage II dataset produced zero batches")
+    if max_steps is not None and optimization_steps != max_steps:
+        raise RuntimeError(
+            f"BadVLA Stage II completed {optimization_steps} of {max_steps} requested steps"
+        )
+    merged = merge_lora(memory_vla.vlm.llm_backbone)
+    if merged != injection.module_names:
+        raise AssertionError("BadVLA Stage II did not merge exactly the injected LoRA modules")
+    return {
+        "objective": "clean_memoryvla_diffusion",
+        "target_modules": "llm_qkvo_plus_memory_action",
+        "lora_merged": True,
+        "perception_frozen": True,
+        "lora_rank": rank,
+        "lora_alpha": alpha,
+        "learning_rate": learning_rate,
+        "lr_decay_step": int(getattr(args, "badvla_stage2_lr_decay_step", 10_000)),
+        "optimization_steps": optimization_steps,
+        "requested_max_steps": max_steps,
+        "epochs": int(args.epochs),
+    }
 
 
 def _run_dropvla(secure_model, dataloader, args):
@@ -440,14 +524,17 @@ def _run_dropvla(secure_model, dataloader, args):
 
 
 def run_train(model, args):
-    """Train MemoryVLA or execute BadVLA's two ordered optimization stages."""
+    """Train MemoryVLA or execute one stage of BadVLA's ordered workflow."""
     max_steps = getattr(args, "max_steps", None)
+    if int(args.epochs) <= 0:
+        raise ValueError("epochs must be positive")
     if max_steps is not None and max_steps <= 0:
         raise ValueError("max_steps must be positive")
     if (
         getattr(args, "dataset_format", None) == "rlds"
         and not getattr(args, "mock", False)
         and max_steps is None
+        and getattr(args, "attack", "none") != "badvla"
     ):
         raise ValueError(
             "Real MemoryVLA RLDS training repeats indefinitely; provide --max_steps "
@@ -457,14 +544,20 @@ def run_train(model, args):
 
     if args.attack == "badvla":
         stage = args.attack_stage
-        if stage in {"both", "stage1"}:
-            _run_badvla_stage1(model, dataloader, args)
-            stage1_path = _save_badvla_checkpoint(model, args.output_dir, "stage1")
+        if stage == "stage1":
+            stage1_config = _run_badvla_stage1(model, dataloader, args)
+            stage1_path = _save_badvla_checkpoint(
+                model, args.output_dir, "stage1", training_config=stage1_config
+            )
             print(f"BadVLA Stage I checkpoint saved to {stage1_path}")
-        if stage in {"both", "stage2"}:
-            _run_badvla_stage2(model, dataloader, args)
-            stage2_path = _save_badvla_checkpoint(model, args.output_dir, "stage2")
+        elif stage == "stage2":
+            stage2_config = _run_badvla_stage2(model, dataloader, args)
+            stage2_path = _save_badvla_checkpoint(
+                model, args.output_dir, "stage2", training_config=stage2_config
+            )
             print(f"BadVLA Stage II checkpoint saved to {stage2_path}")
+        else:
+            raise ValueError(f"Unsupported BadVLA stage: {stage!r}")
         _save_statistics(dataloader.dataset, args.output_dir)
         return
     if args.attack == "dropvla":
@@ -475,32 +568,89 @@ def run_train(model, args):
     if not trainable_parameters:
         raise RuntimeError("MemoryVLA has no trainable parameters")
     optimizer = torch.optim.AdamW(trainable_parameters, lr=args.learning_rate, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _step: 1.0)
+    per_device_batch = int(
+        dataloader.batch_size
+        or (getattr(args, "group_size", None) or getattr(_find_memory_vla(model), "group_size", 1))
+    )
+    global_batch = int(getattr(args, "global_batch_size", per_device_batch))
+    if global_batch <= 0 or global_batch % per_device_batch != 0:
+        raise ValueError("global_batch_size must be a positive multiple of the actual batch size")
+    accumulation_steps = global_batch // per_device_batch
     model_dtype = _module_dtype(_find_memory_vla(model))
     optimization_steps = 0
     stop = False
+    micro_steps = 0
     print("\n--- Running Standard Training ---")
     model.train()
+    optimizer.zero_grad(set_to_none=True)
     for epoch in range(args.epochs):
         _reset_memory_vla(model)
         pbar = tqdm(dataloader, desc=f"Standard Train Epoch {epoch + 1}/{args.epochs}")
         for batch in pbar:
             pixel_values = _images_to(batch["pixel_values"], args.device, model_dtype)
             actions = batch["actions"].to(device=args.device, dtype=model_dtype)
-            loss, _ = _forward_memory_vla(model, batch, pixel_values, actions, args.device)
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                trainable_parameters, max_norm=getattr(args, "max_grad_norm", 1.0)
+            loss, _ = _forward_memory_vla(
+                model,
+                batch,
+                pixel_values,
+                actions,
+                args.device,
+                repeated_diffusion_steps=getattr(args, "repeated_diffusion_steps", 4),
             )
-            optimizer.step()
-            optimization_steps += 1
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-            if max_steps is not None and optimization_steps >= max_steps:
-                stop = True
+            (loss / accumulation_steps).backward()
+            micro_steps += 1
+            if micro_steps % accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(
+                    trainable_parameters, max_norm=getattr(args, "max_grad_norm", 1.0)
+                )
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                optimization_steps += 1
+                if max_steps is not None and optimization_steps >= max_steps:
+                    stop = True
+            pbar.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "step": optimization_steps,
+                "accum": f"{((micro_steps - 1) % accumulation_steps) + 1}/{accumulation_steps}",
+            })
+            if stop:
                 break
         if stop:
             break
 
-    path = _save_memoryvla_checkpoint(model, args.output_dir)
+    pending_micro_steps = micro_steps % accumulation_steps
+    if pending_micro_steps:
+        # Finite local datasets need not divide evenly into the official global
+        # batch. Convert the already accumulated 1/accumulation-scaled gradients
+        # into an average over the actual final micro-batches before stepping.
+        correction = accumulation_steps / pending_micro_steps
+        for parameter in trainable_parameters:
+            if parameter.grad is not None:
+                parameter.grad.mul_(correction)
+        torch.nn.utils.clip_grad_norm_(
+            trainable_parameters, max_norm=getattr(args, "max_grad_norm", 1.0)
+        )
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+        optimization_steps += 1
+
+    path = _save_memoryvla_checkpoint(
+        model,
+        args.output_dir,
+        training_config={
+            "objective": "memoryvla_diffusion",
+            "learning_rate": float(args.learning_rate),
+            "scheduler": "constant",
+            "global_batch_size": global_batch,
+            "per_device_batch_size": per_device_batch,
+            "gradient_accumulation_steps": accumulation_steps,
+            "max_grad_norm": float(getattr(args, "max_grad_norm", 1.0)),
+            "repeated_diffusion_steps": int(getattr(args, "repeated_diffusion_steps", 4)),
+            "optimization_steps": optimization_steps,
+        },
+    )
     _save_statistics(dataloader.dataset, args.output_dir)
     print(f"Training Complete. Model saved to {path}")

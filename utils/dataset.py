@@ -500,7 +500,16 @@ def get_dataloader(args, model, *, train=True):
     loader_type = str(getattr(memory_vla, "dataloader_type", "group")) if loader_type == "auto" else loader_type
     group_size = getattr(args, "group_size", None) or int(getattr(memory_vla, "group_size", 16))
     batch_size = getattr(args, "batch_size", None)
-    batch_size = (group_size if loader_type == "group" else 1) if batch_size is None else batch_size
+    is_iterable = isinstance(dataset, IterableDataset)
+    if batch_size is None:
+        # Official MemoryVLA trains LIBERO with 32 examples per GPU, arranged
+        # as two 16-frame episode groups. Map-style local adapters expose only
+        # one group per batch and therefore retain the group-size default.
+        batch_size = (
+            32 if is_iterable and loader_type == "group"
+            else group_size if loader_type == "group"
+            else 1
+        )
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     memory_vla.dataloader_type = loader_type
@@ -511,7 +520,6 @@ def get_dataloader(args, model, *, train=True):
             bank.dataloader_type = loader_type
             bank.group_size = group_size
 
-    is_iterable = isinstance(dataset, IterableDataset)
     if is_iterable:
         if loader_type == "group":
             if batch_size % group_size != 0:

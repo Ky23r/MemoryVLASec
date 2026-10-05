@@ -1,30 +1,41 @@
-"""A-MemGuard-inspired adapter for MemoryVLA's actual latent memories.
+"""A-MemGuard's architecture-adapted defense for MemoryVLA latent memory.
 
-Upstream A-MemGuard audits textual RAG items by generating query-conditioned
-reasoning chains and judging their consistency/safety with an LLM (or, in its
-alternative path, clustering reasoning-chain sentence embeddings). MemoryVLA
-stores no text or reasoning chains. This module therefore implements the
-smallest explicit architecture adapter: cosine-distance clustering over the
-real per-timestep latent entries retrieved from each MemoryVLA memory bank.
+The published A-MemGuard main method operates on *textual* agent memories: an
+LLM generates one structured reasoning chain per retrieved memory, another LLM
+judges those paths against their consensus, and rejected paths are retained in
+a lesson memory for future action revision. MemoryVLA stores fixed-shape latent
+tensors and has no textual memory records or text/action-plan generator.
 
-It is not the upstream semantic LLM auditor and makes no claim of equivalent
-defense effectiveness. It has no trainable detector weights; real runs load a
-calibration checkpoint containing the validated clustering configuration and
-its provenance.
+This module therefore implements an explicitly named ``AMemGuardLatent``
+adapter. It preserves the method's placement and lifecycle:
+
+* query-based top-k retrieval before memory-to-action attention;
+* one query-conditioned latent path per candidate memory;
+* the paper's official embedding-distance consensus instantiation;
+* a separate negative lesson memory used for proactive future rejection.
+
+It is not the paper's main LLM-as-a-judge implementation. The unavoidable
+representation and revision differences are documented in
+``IMPLEMENTATION_REVIEW.md`` and exposed in result metadata.
 """
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-import json
-from pathlib import Path
 from typing import Any, Sequence
 
 import torch
+import torch.nn.functional as F
 
 from .base_defense import BaseDefense
 
 
-AMEMGUARD_CHECKPOINT_FORMAT = "memoryvlasec-amemguard-latent-v1"
+@dataclass(frozen=True)
+class LatentLesson:
+    query: torch.Tensor
+    path: torch.Tensor
+    source_timestep: Any
 
 
 @dataclass(frozen=True)
@@ -32,155 +43,164 @@ class MemoryFilterDecision:
     bank_name: str
     episode_id: Any
     candidate_count: int
+    retrieved_indices: tuple[int, ...]
     accepted_indices: tuple[int, ...]
     rejected_indices: tuple[int, ...]
-    feature_shape: tuple[int, ...]
+    consensus_rejected_indices: tuple[int, ...]
+    lesson_rejected_indices: tuple[int, ...]
+    divergence_scores: tuple[float, ...]
     reason: str
 
 
-class AMemGuard(BaseDefense):
-    """Filter pre-attention MemoryVLA history using dominant latent clusters.
+class AMemGuardLatent(BaseDefense):
+    """Query-conditioned consensus validation with a negative lesson memory."""
 
-    ``cosine_distance_eps`` and ``min_cluster_size`` mirror the defaults of
-    upstream A-MemGuard's optional DBSCAN path. The representation does not:
-    upstream clusters textual reasoning-chain embeddings, while this adapter
-    clusters pooled MemoryVLA memory-item tensors shaped ``[N, D]``.
-    """
+    method_name = "amemguard_latent_embedding_distance"
+    source_method = "A-MemGuard embedding-distance validation + dual memory"
+    faithful_main_method = False
 
-    def __init__(self, cosine_distance_eps: float = 0.5, min_cluster_size: int = 2):
-        if not 0.0 <= cosine_distance_eps <= 2.0:
-            raise ValueError("cosine_distance_eps must be in [0, 2]")
-        if min_cluster_size < 2:
-            raise ValueError("min_cluster_size must be at least 2")
-        self.cosine_distance_eps = float(cosine_distance_eps)
-        self.min_cluster_size = int(min_cluster_size)
+    def __init__(
+        self,
+        *,
+        divergence_threshold: float = 0.10,
+        top_k: int = 4,
+        lesson_capacity: int = 256,
+        lesson_similarity_threshold: float = 0.90,
+    ) -> None:
+        if not 0.0 <= divergence_threshold <= 2.0:
+            raise ValueError("divergence_threshold must be in [0, 2]")
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if lesson_capacity <= 0:
+            raise ValueError("lesson_capacity must be positive")
+        if not -1.0 <= lesson_similarity_threshold <= 1.0:
+            raise ValueError("lesson_similarity_threshold must be in [-1, 1]")
+        self.divergence_threshold = float(divergence_threshold)
+        self.top_k = int(top_k)
+        self.lesson_capacity = int(lesson_capacity)
+        self.lesson_similarity_threshold = float(lesson_similarity_threshold)
+        self.lesson_memory: dict[str, list[LatentLesson]] = {
+            "cognition": [],
+            "perception": [],
+        }
         self.last_decisions: dict[str, MemoryFilterDecision] = {}
         self.reset_metrics()
 
+    @staticmethod
+    def _pooled(feature: torch.Tensor) -> torch.Tensor:
+        if not torch.is_tensor(feature) or feature.ndim != 2:
+            raise ValueError("MemoryVLA memory features must be rank-2 [N, D] tensors")
+        if not torch.isfinite(feature).all():
+            raise ValueError("MemoryVLA memory feature contains non-finite values")
+        return F.normalize(feature.detach().float().mean(dim=0), dim=0, eps=1e-12)
+
     @classmethod
-    def from_checkpoint(
-        cls,
-        checkpoint_path: str | Path,
-        *,
-        expected_cosine_distance_eps: float | None = None,
-        expected_min_cluster_size: int | None = None,
-        expected_provenance: dict[str, Any] | None = None,
-    ) -> "AMemGuard":
-        """Load a calibrated latent-filter configuration and fail closed on mismatch.
+    def latent_reasoning_path(
+        cls, current_state: torch.Tensor, memory_state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Construct a structured, query-conditioned latent semantic path."""
+        query = cls._pooled(current_state)
+        memory = cls._pooled(memory_state)
+        path = torch.cat((query, memory, query * memory, memory - query), dim=0)
+        return query, F.normalize(path, dim=0, eps=1e-12)
 
-        A-MemGuard's MemoryVLA adapter is deterministic and has no neural weights.
-        Its real artifact therefore records the calibrated clustering parameters,
-        provenance, and format instead of pretending to contain a trainable model.
-        """
-        path = Path(checkpoint_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"A-MemGuard defense checkpoint not found: {path}")
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Invalid A-MemGuard JSON checkpoint: {path}: {exc}") from exc
-        if not isinstance(payload, dict) or payload.get("format") != AMEMGUARD_CHECKPOINT_FORMAT:
-            raise ValueError(
-                f"Unsupported A-MemGuard checkpoint format in {path}; "
-                f"expected {AMEMGUARD_CHECKPOINT_FORMAT!r}"
-            )
-        if payload.get("adapter") != "memoryvla_latent_dbscan":
-            raise ValueError(f"A-MemGuard checkpoint targets a different adapter: {path}")
-        if not payload.get("provenance"):
-            raise ValueError(f"A-MemGuard checkpoint is missing calibration provenance: {path}")
-        provenance = payload["provenance"]
-        if not isinstance(provenance, dict):
-            raise TypeError(f"A-MemGuard checkpoint provenance must be a mapping: {path}")
-        if expected_provenance is not None:
-            mismatches = {
-                key: (provenance.get(key), expected)
-                for key, expected in expected_provenance.items()
-                if provenance.get(key) != expected
-            }
-            if mismatches:
-                raise ValueError(
-                    "A-MemGuard calibration provenance is incompatible with this real run: "
-                    f"{mismatches!r}"
-                )
-        config = payload.get("config")
-        if not isinstance(config, dict):
-            raise TypeError(f"A-MemGuard checkpoint config must be a mapping: {path}")
-        eps = config.get("cosine_distance_eps")
-        minimum = config.get("min_cluster_size")
-        if expected_cosine_distance_eps is not None and float(eps) != float(expected_cosine_distance_eps):
-            raise ValueError(
-                "A-MemGuard checkpoint cosine_distance_eps does not match the requested value: "
-                f"checkpoint={eps!r}, requested={expected_cosine_distance_eps!r}"
-            )
-        if expected_min_cluster_size is not None and int(minimum) != int(expected_min_cluster_size):
-            raise ValueError(
-                "A-MemGuard checkpoint min_cluster_size does not match the requested value: "
-                f"checkpoint={minimum!r}, requested={expected_min_cluster_size!r}"
-            )
-        instance = cls(cosine_distance_eps=float(eps), min_cluster_size=int(minimum))
-        instance.checkpoint_path = str(path.resolve())
-        instance.checkpoint_provenance = provenance
-        return instance
+    @staticmethod
+    def _centroid_divergence(paths: torch.Tensor) -> torch.Tensor:
+        if paths.ndim != 2 or paths.shape[0] == 0:
+            raise ValueError("paths must be a non-empty [K, D] tensor")
+        centroid = F.normalize(paths.mean(dim=0), dim=0, eps=1e-12)
+        return 1.0 - paths @ centroid
 
-    def reset_metrics(self):
-        """Reset reporting counters; this does not affect filtering decisions."""
-        self._metrics = defaultdict(lambda: Counter(calls=0, candidates=0, accepted=0, rejected=0))
+    def _relevant_lessons(self, bank_name: str, query: torch.Tensor) -> list[LatentLesson]:
+        lessons = self.lesson_memory[bank_name]
+        if not lessons:
+            return []
+        queries = torch.stack([lesson.query.to(query.device) for lesson in lessons])
+        scores = queries @ query
+        count = min(self.top_k, len(lessons))
+        indices = torch.topk(scores, k=count, largest=True, sorted=True).indices.tolist()
+        return [lessons[index] for index in indices]
+
+    def _lesson_rejections(
+        self,
+        bank_name: str,
+        query: torch.Tensor,
+        paths: torch.Tensor,
+    ) -> set[int]:
+        relevant = self._relevant_lessons(bank_name, query)
+        if not relevant:
+            return set()
+        lesson_paths = torch.stack([lesson.path.to(paths.device) for lesson in relevant])
+        similarities = paths @ lesson_paths.transpose(0, 1)
+        matches = similarities.max(dim=1).values >= self.lesson_similarity_threshold
+        return set(torch.nonzero(matches, as_tuple=False).flatten().tolist())
+
+    def _store_lesson(
+        self,
+        bank_name: str,
+        query: torch.Tensor,
+        path: torch.Tensor,
+        timestep: Any,
+    ) -> None:
+        lessons = self.lesson_memory[bank_name]
+        query_cpu = query.detach().cpu().clone()
+        path_cpu = path.detach().cpu().clone()
+        if lessons:
+            similarities = torch.stack([lesson.path for lesson in lessons]) @ path_cpu
+            if bool((similarities >= 0.999).any()):
+                return
+        lessons.append(LatentLesson(query_cpu, path_cpu, timestep))
+        if len(lessons) > self.lesson_capacity:
+            del lessons[: len(lessons) - self.lesson_capacity]
+
+    def reset_metrics(self) -> None:
+        self._metrics = defaultdict(
+            lambda: Counter(
+                calls=0,
+                candidates=0,
+                retrieved=0,
+                accepted=0,
+                rejected=0,
+                consensus_rejected=0,
+                lesson_rejected=0,
+            )
+        )
         self.last_decisions.clear()
+
+    def reset_lessons(self) -> None:
+        for lessons in self.lesson_memory.values():
+            lessons.clear()
 
     def metrics(self) -> dict[str, dict[str, float | int | None]]:
         result = {}
-        for bank_name, counts in sorted(self._metrics.items()):
-            candidates = int(counts["candidates"])
+        for bank_name in ("cognition", "perception"):
+            counts = self._metrics[bank_name]
+            retrieved = int(counts["retrieved"])
             result[bank_name] = {
                 "calls": int(counts["calls"]),
-                "candidates": candidates,
+                "candidates": int(counts["candidates"]),
+                "retrieved": retrieved,
                 "accepted": int(counts["accepted"]),
                 "rejected": int(counts["rejected"]),
-                "rejection_rate": float(counts["rejected"]) / candidates if candidates else None,
+                "consensus_rejected": int(counts["consensus_rejected"]),
+                "lesson_rejected": int(counts["lesson_rejected"]),
+                "rejection_rate": int(counts["rejected"]) / retrieved if retrieved else None,
+                "lessons": len(self.lesson_memory[bank_name]),
             }
         return result
 
-    @staticmethod
-    def _latent_vectors(features: Sequence[torch.Tensor]) -> torch.Tensor:
-        vectors = []
-        for feature in features:
-            if not torch.is_tensor(feature) or feature.ndim != 2:
-                raise ValueError("MemoryVLA memory items must be rank-2 tensors [N, D]")
-            if not torch.isfinite(feature).all():
-                raise ValueError("MemoryVLA memory item contains non-finite values")
-            vectors.append(feature.detach().float().mean(dim=0))
-        vectors = torch.stack(vectors, dim=0)
-        return torch.nn.functional.normalize(vectors, dim=-1, eps=1e-12)
-
-    def _dominant_cluster(self, vectors: torch.Tensor) -> tuple[int, ...]:
-        """Deterministic DBSCAN-equivalent clustering for cosine distances."""
-        count = int(vectors.shape[0])
-        similarities = vectors @ vectors.transpose(0, 1)
-        neighbors = similarities >= (1.0 - self.cosine_distance_eps)
-        core = neighbors.sum(dim=1) >= self.min_cluster_size
-        labels = [-1] * count
-        cluster_id = 0
-
-        for seed in range(count):
-            if not bool(core[seed]) or labels[seed] != -1:
-                continue
-            labels[seed] = cluster_id
-            queue = [seed]
-            while queue:
-                current = queue.pop(0)
-                for neighbor in torch.nonzero(neighbors[current], as_tuple=False).flatten().tolist():
-                    if labels[neighbor] == -1:
-                        labels[neighbor] = cluster_id
-                        if bool(core[neighbor]):
-                            queue.append(neighbor)
-            cluster_id += 1
-
-        populated = Counter(label for label in labels if label >= 0)
-        if not populated:
-            return ()
-        dominant = populated.most_common(1)[0][0]
-        return tuple(index for index, label in enumerate(labels) if label == dominant)
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "method": self.method_name,
+            "source_method": self.source_method,
+            "faithful_main_method": self.faithful_main_method,
+            "adaptation": "query_conditioned_latent_paths",
+            "validator": "embedding_centroid_cosine_distance",
+            "divergence_threshold": self.divergence_threshold,
+            "top_k": self.top_k,
+            "lesson_capacity": self.lesson_capacity,
+            "lesson_similarity_threshold": self.lesson_similarity_threshold,
+        }
 
     def filter_history(
         self,
@@ -190,56 +210,94 @@ class AMemGuard(BaseDefense):
         history: Sequence[tuple[Any, torch.Tensor]],
         episode_id: Any,
     ) -> list[tuple[Any, torch.Tensor]]:
-        """Return accepted original history entries, before retrieval attention."""
-        if bank_name not in {"cognition", "perception"}:
+        if bank_name not in self.lesson_memory:
             raise ValueError(f"Unknown MemoryVLA memory bank: {bank_name!r}")
-        if not torch.is_tensor(current_state) or current_state.ndim != 2:
-            raise ValueError("current_state must be a rank-2 MemoryVLA token tensor [N, D]")
         if not isinstance(history, (list, tuple)):
             raise TypeError("history must be a sequence of (timestep, feature) pairs")
-
         entries = list(history)
-        features = []
         for entry in entries:
             if not isinstance(entry, (list, tuple)) or len(entry) != 2:
                 raise TypeError("history entries must be (timestep, feature) pairs")
-            feature = entry[1]
-            if not torch.is_tensor(feature) or feature.shape != current_state.shape:
-                raise ValueError(
-                    f"{bank_name} memory feature shape must equal current token shape "
-                    f"{tuple(current_state.shape)}"
-                )
-            features.append(feature)
+            if not torch.is_tensor(entry[1]) or entry[1].shape != current_state.shape:
+                raise ValueError("history and current MemoryVLA token shapes must match")
 
         candidate_count = len(entries)
-        if candidate_count < self.min_cluster_size:
-            accepted = tuple(range(candidate_count))
-            reason = "insufficient_candidates_for_consistency_check"
+        if not entries:
+            return []
+
+        query = self._pooled(current_state)
+        memories = torch.stack([self._pooled(entry[1]).to(query.device) for entry in entries])
+        relevance = memories @ query
+        retrieve_count = min(self.top_k, candidate_count)
+        retrieved_indices = tuple(sorted(
+            torch.topk(relevance, k=retrieve_count, largest=True, sorted=False).indices.tolist()
+        ))
+        paths = torch.stack([
+            self.latent_reasoning_path(current_state, entries[index][1])[1].to(query.device)
+            for index in retrieved_indices
+        ])
+
+        if retrieve_count == 1:
+            divergence = torch.zeros(1, device=paths.device)
+            consensus_rejected_local: set[int] = set()
+            reason = "single_path_no_consensus"
         else:
-            with torch.no_grad():
-                accepted = self._dominant_cluster(self._latent_vectors(features))
-            reason = "dominant_latent_cluster" if accepted else "no_dominant_cluster"
-        accepted_set = set(accepted)
-        rejected = tuple(index for index in range(candidate_count) if index not in accepted_set)
+            divergence = self._centroid_divergence(paths)
+            consensus_rejected_local = set(torch.nonzero(
+                divergence > self.divergence_threshold, as_tuple=False
+            ).flatten().tolist())
+            reason = "query_conditioned_embedding_consensus"
+
+        lesson_rejected_local = self._lesson_rejections(bank_name, query, paths)
+        rejected_local = consensus_rejected_local | lesson_rejected_local
+        accepted_indices = tuple(
+            original for local, original in enumerate(retrieved_indices) if local not in rejected_local
+        )
+        consensus_rejected = tuple(
+            original for local, original in enumerate(retrieved_indices)
+            if local in consensus_rejected_local
+        )
+        lesson_rejected = tuple(
+            original for local, original in enumerate(retrieved_indices)
+            if local in lesson_rejected_local
+        )
+        rejected_indices = tuple(
+            original for local, original in enumerate(retrieved_indices) if local in rejected_local
+        )
+
+        for local in consensus_rejected_local:
+            original = retrieved_indices[local]
+            self._store_lesson(
+                bank_name,
+                query,
+                paths[local],
+                entries[original][0],
+            )
 
         counts = self._metrics[bank_name]
         counts["calls"] += 1
         counts["candidates"] += candidate_count
-        counts["accepted"] += len(accepted)
-        counts["rejected"] += len(rejected)
+        counts["retrieved"] += retrieve_count
+        counts["accepted"] += len(accepted_indices)
+        counts["rejected"] += len(rejected_indices)
+        counts["consensus_rejected"] += len(consensus_rejected)
+        counts["lesson_rejected"] += len(lesson_rejected)
         self.last_decisions[bank_name] = MemoryFilterDecision(
             bank_name=bank_name,
             episode_id=episode_id,
             candidate_count=candidate_count,
-            accepted_indices=accepted,
-            rejected_indices=rejected,
-            feature_shape=tuple(current_state.shape),
+            retrieved_indices=retrieved_indices,
+            accepted_indices=accepted_indices,
+            rejected_indices=rejected_indices,
+            consensus_rejected_indices=consensus_rejected,
+            lesson_rejected_indices=lesson_rejected,
+            divergence_scores=tuple(float(value) for value in divergence.detach().cpu()),
             reason=reason,
         )
-        return [entry for index, entry in enumerate(entries) if index in accepted_set]
+        accepted = set(accepted_indices)
+        return [entry for index, entry in enumerate(entries) if index in accepted]
 
     def validate_memory(self, memory_features, context=None, **kwargs):
         raise NotImplementedError(
-            "A-MemGuard must be attached at MemoryVLA's pre-attention history hook; "
-            "post-fusion validate_memory is semantically invalid"
+            "AMemGuardLatent must run at MemoryVLA's pre-attention retrieval hook"
         )
