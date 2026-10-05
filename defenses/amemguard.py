@@ -14,9 +14,8 @@ adapter. It preserves the method's placement and lifecycle:
 * the paper's official embedding-distance consensus instantiation;
 * a separate negative lesson memory used for proactive future rejection.
 
-It is not the paper's main LLM-as-a-judge implementation. The unavoidable
-representation and revision differences are documented in
-``IMPLEMENTATION_REVIEW.md`` and exposed in result metadata.
+It is not the paper's main LLM-as-a-judge implementation. The representation
+and revision differences are exposed in result metadata.
 """
 
 from __future__ import annotations

@@ -39,14 +39,12 @@ env/
 *.safetensors
 
 # Results, logs, and experiment trackers
-/output/*
-!/output/.gitkeep
+/output/
 /outputs/
 /results/
 /reports/
 /runs/
-/logs/*
-!/logs/.gitkeep
+/logs/
 /artifacts/
 wandb/
 mlruns/
@@ -55,6 +53,7 @@ slurm-*.out
 
 # Temporary files
 /tmp/
+/.tmp/
 /temp/
 *.tmp
 *.temp

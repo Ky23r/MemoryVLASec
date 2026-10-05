@@ -9,7 +9,7 @@ with two attack pipelines—BadVLA and DropVLA—and an explicitly scoped
 LLM-as-a-judge system. MemoryVLA stores latent tensor memories rather than text
 records, so the adapter uses A-MemGuard's published embedding-distance
 validation variant, query-conditioned latent paths, and a negative lesson
-memory. See `IMPLEMENTATION_REVIEW.md` for the exact adaptation boundary.
+memory.
 
 The provided workflows support training attack checkpoints and evaluating them
 in LIBERO, either without a defense or with the latent adapter enabled. Execution uses
@@ -38,6 +38,7 @@ MemoryVLASec/
 ├── output/                  # Evaluation results
 ├── scripts/
 │   ├── download_assets.sh
+│   ├── test_pretrained_memoryvla.sh
 │   ├── train_memoryvla.sh
 │   ├── train_badvla.sh
 │   ├── eval_badvla.sh
@@ -97,6 +98,17 @@ bash scripts/download_assets.sh
 
 Assets are stored under `.cache/memoryvlasec/`. The download script is
 restartable and reuses files already present in the cache.
+
+Verify the pretrained checkpoint by loading the complete model and running one
+DDIM inference on a synthetic RGB observation:
+
+```bash
+conda activate memoryvlasec
+bash scripts/test_pretrained_memoryvla.sh
+```
+
+The script validates both returned 16-by-7 action chunks, finite values, and
+the first-frame memory update. It does not train or modify the checkpoint.
 
 ## Execution workflow
 
