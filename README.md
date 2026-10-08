@@ -1,3 +1,10 @@
+## Method-specific entry points
+
+DropVLA uses the preserved experiment runtime under `attacks/dropvla/`;
+BadVLA uses the current remote implementation under `attacks/badvla/`.
+Use `scripts/dropvla/` and `scripts/badvla/` respectively. Root script names
+remain compatibility wrappers. See [method layout and reproduction](docs/method_layout_vi.md).
+
 # MemoryVLASec
 
 MemoryVLASec is a research framework for studying memory-oriented security in
