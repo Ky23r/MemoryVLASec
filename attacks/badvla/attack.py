@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
-from .base_attack import BaseAttack
+from attacks.base_attack import BaseAttack
 
 
 # v3 distinguishes merged-LoRA checkpoints produced by the faithful two-stage

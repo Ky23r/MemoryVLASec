@@ -6,13 +6,13 @@ import torch
 
 from models.core.vla.memory_vla import CogMemBank
 from scripts.summarize_badvla import summarize
-from utils.args import parse_arguments
-from utils.evaluate import (
+from attacks.badvla.args import parse_arguments
+from attacks.badvla.evaluate import (
     compute_amemguard_condition_metrics,
     compute_badvla_asr,
 )
-from utils.libero_evaluate import LIBERO_MAX_STEPS, _libero_action
-from utils.mock_components import run_mock_interface_check
+from attacks.badvla.libero_evaluate import LIBERO_MAX_STEPS, _libero_action
+from attacks.badvla.mock_components import run_mock_interface_check
 
 
 def test_mock_baseline_interface():

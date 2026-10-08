@@ -7,8 +7,8 @@ from torch import nn
 from attacks.badvla import BADVLA_CHECKPOINT_FORMAT, BadVLA, validate_checkpoint_metadata
 from attacks.lora import LoRALinear, inject_lora, merge_lora
 from defenses.amemguard import AMemGuardLatent
-from utils.args import parse_arguments
-from utils.train import _configure_stage1, _configure_stage2
+from attacks.badvla.args import parse_arguments
+from attacks.badvla.train import _configure_stage1, _configure_stage2
 
 
 def test_badvla_trigger_is_white_center_square_before_normalization():
