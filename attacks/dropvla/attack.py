@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from .base_attack import BaseAttack
+from attacks.base_attack import BaseAttack
 
 
 DROPVLA_CHECKPOINT_FORMAT = "memoryvlasec-dropvla-v1"
@@ -25,8 +25,9 @@ DROPVLA_CHECKPOINT_FORMAT = "memoryvlasec-dropvla-v1"
 @dataclass(frozen=True)
 class DropVLAConfig:
     modality: str = "vision"
-    protocol: str = "paper_faithful"
-    episode_poison_rate: float = 0.0031
+    protocol: str = "released_repo"
+    episode_poison_rate: float = 0.05
+    step_poison_rate: float = 1.0
     relabel_length: int = 8
     gripper_index: int = 6
     target_gripper_value: float = 1.0
@@ -40,8 +41,10 @@ class DropVLAConfig:
     def __post_init__(self) -> None:
         if self.modality not in {"vision", "text", "joint"}:
             raise ValueError("DropVLA modality must be vision, text, or joint")
-        if self.protocol not in {"paper_faithful", "upstream_legacy"}:
-            raise ValueError("DropVLA protocol must be paper_faithful or upstream_legacy")
+        if self.protocol not in {"released_repo", "paper_faithful", "upstream_legacy"}:
+            raise ValueError("Invalid DropVLA protocol")
+        if not 0 <= self.step_poison_rate <= 1:
+            raise ValueError("step_poison_rate must be in [0, 1]")
         if not 0 <= self.episode_poison_rate <= 1:
             raise ValueError("episode_poison_rate must be in [0, 1]")
         if self.relabel_length < 1 or self.trigger_radius < 1:
@@ -175,6 +178,8 @@ class DropVLA(BaseAttack):
         device: torch.device | str,
     ) -> tuple[torch.Tensor | dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """Return transformed pixels, relabeled actions, and poison mask."""
+        if self.config.protocol == "released_repo":
+            raise RuntimeError("released_repo requires raw-step poisoning before chunking; use DropVLARLDSDataset")
         ids = torch.as_tensor(episode_ids).reshape(-1).tolist()
         if len(ids) != len(images) or actions.shape[0] != len(images):
             raise ValueError("images, actions, and episode_ids must share batch size")
