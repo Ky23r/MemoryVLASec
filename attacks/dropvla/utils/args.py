@@ -7,7 +7,7 @@ def parse_arguments(argv=None):
     security_probe = argparse.ArgumentParser(add_help=False)
     security_probe.add_argument("--mode", choices=["train", "evaluate", "verify"], default="evaluate")
     security_probe.add_argument("--attack", choices=["none", "badvla", "dropvla"], default="none")
-    security_probe.add_argument("--defense", choices=["none", "amemguard"], default="none")
+    security_probe.add_argument("--defense", choices=["none"], default="none")
     security_args, _ = security_probe.parse_known_args(argv)
     parser = argparse.ArgumentParser(
         description="MemoryVLASec: VLA Attack and Defense Framework"
@@ -131,7 +131,7 @@ def parse_arguments(argv=None):
         "--defense_checkpoint",
         type=str,
         default="",
-        help="A-MemGuard calibration checkpoint required by real defended LIBERO evaluation.",
+        help="Legacy option retained for argument compatibility; nonempty values are rejected.",
     )
 
     # Model & Training configuration
@@ -248,9 +248,9 @@ def parse_arguments(argv=None):
     parser.add_argument(
         "--defense",
         type=str,
-        choices=["none", "amemguard"],
+        choices=["none"],
         default="none",
-        help="Defense method to apply",
+        help="Preserved DropVLA attack runtime; only none is supported",
     )
     # Security options remain absent from the clean baseline parser/help.
     if security_args.attack == "badvla" and security_args.mode != "verify":
@@ -303,21 +303,7 @@ def parse_arguments(argv=None):
         parser.add_argument("--dropvla_relabel_length", type=int, default=8)
         parser.add_argument("--dropvla_trigger_alpha", type=float, default=1.0)
         parser.add_argument("--dropvla_trigger_shape", choices=["circle", "triangle"], default="circle")
-    if security_args.defense != "none" and security_args.mode == "evaluate":
-        parser.add_argument(
-            "--amemguard_cosine_distance_eps",
-            type=float,
-            default=0.5,
-            help=(
-                "Cosine-distance radius for the MemoryVLA latent-cluster adapter. "
-                "This is not an upstream LLM-auditor confidence threshold."
-            ),
-        )
-        parser.add_argument(
-            "--amemguard_min_cluster_size",
-            type=int,
-            default=2,
-            help="Minimum retrieved-memory cluster size (upstream DBSCAN default: 2).",
-        )
-
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.defense_checkpoint:
+        parser.error("Legacy defense calibration is unsupported in the preserved DropVLA runtime")
+    return args

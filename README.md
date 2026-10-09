@@ -19,7 +19,8 @@ validation variant, query-conditioned latent paths, and a negative lesson
 memory.
 
 The provided workflows support training attack checkpoints and evaluating them
-in LIBERO, either without a defense or with the latent adapter enabled. Execution uses
+in LIBERO. BadVLA also supports the latent defense adapter; the preserved DropVLA
+runtime runs without defense. Execution uses
 standard Bash and Python commands on Linux and does not depend on a scheduler or
 a specific GPU model.
 
@@ -28,9 +29,9 @@ a specific GPU model.
 | Experiment | Training | LIBERO evaluation | Defense evaluation |
 | --- | --- | --- | --- |
 | BadVLA | Two-stage LoRA training | Four-arm ASR protocol | `amemguard_latent` |
-| DropVLA | Visual-trigger training | Yes | `amemguard_latent` |
+| DropVLA | Visual-trigger training | Yes | Pending separate integration |
 
-The defense adapter is enabled only by the two defended evaluation scripts. The
+The current defense adapter is enabled by the BadVLA defended evaluation script. The
 unguarded scripts explicitly run with `--defense none`.
 
 ## Repository structure
@@ -40,7 +41,9 @@ MemoryVLASec/
 ├── attacks/                 # BadVLA and DropVLA attack implementations
 ├── configs/
 │   └── runtime.env          # Shared runtime defaults and artifact paths
-├── defenses/                # Explicit A-MemGuard latent adaptation
+├── defenses/
+│   ├── base_defense.py
+│   └── amemguard/           # Current A-MemGuard latent adaptation
 ├── models/                  # MemoryVLA core and security wrapper
 ├── output/                  # Evaluation results
 ├── scripts/
@@ -52,7 +55,6 @@ MemoryVLASec/
 │   ├── train_dropvla.sh
 │   ├── eval_dropvla.sh
 │   ├── eval_badvla_amemguard.sh
-│   ├── eval_dropvla_amemguard.sh
 │   └── _common.sh           # Internal shared shell helper
 ├── utils/                   # Data, training, and evaluation utilities
 ├── main.py                  # Python entry point
@@ -201,12 +203,10 @@ conda activate memoryvlasec
 bash scripts/eval_dropvla.sh
 ```
 
-Evaluate the same attack with the latent defense adapter:
-
-```bash
-conda activate memoryvlasec
-bash scripts/eval_dropvla_amemguard.sh
-```
+The completed DropVLA experiment ran without defense. Its obsolete defense
+implementation has been removed. Current A-MemGuard lives in `defenses/amemguard/`;
+integration with the pinned DropVLA model requires separate validation.
+The old defended DropVLA command exits with an explanatory error before waiting for a GPU.
 
 The current MemoryVLA training adapter supports DropVLA's visual modality. The
 text and joint modalities are not supported by this training workflow.
@@ -280,7 +280,7 @@ original batch size of 4.
 | BadVLA ASR summary | `output/badvla_protocol/summary.json` |
 | BadVLA defended summary | `output/badvla_protocol/defense_summary.json` |
 | DropVLA results | `output/dropvla/results.json` |
-| DropVLA + latent defense results | `output/dropvla_amemguard_latent/results.json` |
+| DropVLA defense evaluation | Not currently integrated |
 
 Evaluation writes `results.json` incrementally after each episode and marks the
 payload as complete after the full suite finishes. Defended results also include

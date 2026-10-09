@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DIRS = ('attacks', 'defenses', 'models', 'utils', 'scripts', 'configs', 'tests')
+SOURCE_DIRS = ('attacks', 'models', 'utils', 'scripts', 'configs', 'tests')
 
 
 def sources(root):
@@ -201,7 +201,7 @@ print(json.dumps({'checkpoint_bytes':Path(paths['checkpoints/memvla-libero-spati
     command('pipeline_tests', [python, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_dropvla_pipeline.py', '-v'])
     command('scheduler_tests', [python, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_gpu_wait.py', '-v'])
     command('guard_tests', [python, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_dropvla_readiness.py', '-v'])
-    command('amemguard_tests', [python, '-m', 'pytest', '-q', 'tests/test_amemguard.py'])
+    command('attack_only_runtime_tests', [python, '-m', 'pytest', '-q', 'tests/test_attack_only_runtime.py'])
     command('logging_tests', [python, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_phase_logging.py', '-v'])
     if before != hashes(ROOT):
         report['checks'].append({'name': 'source_stability', 'status': 'failed', 'error': 'Source changed during validation'})

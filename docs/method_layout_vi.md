@@ -8,21 +8,23 @@
 - Tên scripts cũ còn là wrappers để lệnh cũ tiếp tục hoạt động.
 
 BadVLA dùng implementation remote tại commit `7c7dfd49`, với imports/paths đổi
-sang method riêng. Defense hiện hành tại `defenses/` là A-MemGuard remote.
+sang method riêng. Defense hiện hành tại `defenses/amemguard/` là A-MemGuard remote.
 Model hiện hành tại `models/` vẫn dùng cho BadVLA/baseline.
 
 ## DropVLA đã hoàn thành experiment
 
 `attacks/dropvla/` là runtime riêng từ snapshot `dropvla_backup/experiment_source`.
-`_main_original.py`, `utils/`, `attacks/`, `models/`, `defenses/` giữ các implementation
+`_main_original.py`, `utils/`, `attacks/`, `models/` giữ các implementation
 của run đã hoàn tất; `main.py` chỉ bootstrap import đúng runtime.
 Các modules `args.py`, `train.py`, `dataset.py`, `evaluate.py`, `metrics.py` là
 facades; thuật toán gốc nằm dưới `utils/` để tránh rewrite imports/source không cần thiết.
 
-Đây là ngoại lệ có chủ đích với model dùng chung: DropVLA giữ bản model và defense
-đã dùng trong run cũ để không nhận thay đổi remote ngầm. Không dùng defense cũ này
-để ghi đè A-MemGuard remote. Model/helper đã pin có thể được hợp nhất ở lần riêng
-sau khi có kiểm tra tương đương; không làm điều đó trong lần tách thư mục.
+DropVLA giữ bản model và thuật toán đã pin để không nhận thay đổi remote ngầm.
+Run đã hoàn thành không bật defense. Defense cũ đã gỡ khỏi runtime;
+parser chỉ nhận `--defense none`, wrapper giữ forward và checkpoint keys của attack.
+Nguồn lịch sử đầy đủ vẫn ở backup và Git `ffe5734e`; manifest ghi rõ các file đã gỡ.
+Defense hiện hành ở root chưa được nối vào model DropVLA đã pin.
+Xem [defense layout](amemguard_method.md).
 
 `config.env` là cấu hình method. Runtime giữ `configs/runtime.env` gốc cho provenance.
 `.cache`, `memoryvlasec`, `output` là links tới assets/environment/results chung;

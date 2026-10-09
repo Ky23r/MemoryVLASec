@@ -70,41 +70,6 @@ dropvla_arguments() {
     )
 }
 
-ensure_amemguard_checkpoint() {
-    local attack="$1"
-    local attack_checkpoint="$2"
-    local defense_checkpoint="$3"
-    local training_command="$4"
-
-    require_file "${attack} checkpoint" "${attack_checkpoint}" "${training_command}"
-    if [[ -s "${defense_checkpoint}" ]]; then
-        if "${PYTHON_BIN}" -c 'import json,sys; p=json.load(open(sys.argv[1])); sys.exit(0 if p.get("format")=="memoryvlasec-amemguard-path-v2" and p.get("adapter")=="memoryvla_query_conditioned_paths" else 1)' "${defense_checkpoint}"; then
-            echo "Using A-MemGuard calibration: ${defense_checkpoint}"
-            return
-        fi
-        echo "Recalibrating outdated A-MemGuard artifact: ${defense_checkpoint}"
-    fi
-
-    mkdir -p "$(dirname -- "${defense_checkpoint}")"
-    local attack_args=()
-    if [[ "${attack}" == "dropvla" ]]; then
-        dropvla_arguments
-        attack_args=("${DROPVLA_ARGS[@]}")
-    fi
-    "${PYTHON_BIN}" scripts/calibrate_amemguard.py \
-        --attack "${attack}" \
-        --attack-checkpoint "${attack_checkpoint}" \
-        --output "${defense_checkpoint}" \
-        --transitions "${AMEMGUARD_CALIBRATION_TRANSITIONS}" \
-        --quantile "${AMEMGUARD_CALIBRATION_QUANTILE}" \
-        --min-cluster-size "${AMEMGUARD_MIN_CLUSTER_SIZE}" \
-        "${attack_args[@]}"
-    if [[ ! -s "${defense_checkpoint}" ]]; then
-        echo "ERROR: A-MemGuard calibration did not create: ${defense_checkpoint}" >&2
-        exit 1
-    fi
-}
-
 run_libero_evaluation() {
     local attack="$1"
     local attack_checkpoint="$2"
@@ -124,8 +89,9 @@ run_libero_evaluation() {
     fi
 
     local defense_args=(--defense "${defense}")
-    if [[ "${defense}" == "amemguard" ]]; then
-        defense_args+=(--defense_checkpoint "${defense_checkpoint}")
+    if [[ "${defense}" != "none" || -n "${defense_checkpoint}" ]]; then
+        echo "ERROR: legacy DropVLA defense was removed; only --defense none is supported." >&2
+        return 2
     fi
 
     mkdir -p "${result_dir}"

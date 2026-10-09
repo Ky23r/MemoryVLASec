@@ -13,3 +13,6 @@ local; không kỳ vọng tồn tại trên máy mới clone repo.
 | [DropVLA readiness](dropvla_readiness_vi.md) | 05–06/10/2026: evidence kiểm tra và caveats của source lúc đó |
 
 Quay lại [hướng dẫn hiện hành](../README.md).
+
+- [A-MemGuard adaptation cũ](amemguard_method.md).
+- [A-MemGuard review cũ](amemguard_review.md).

@@ -8,7 +8,7 @@
 - [DropVLA: phases, chờ GPU, logs và recovery chỉ inference](dropvla_gpu_queue_vi.md).
 - [DropVLA: số đo tài nguyên và cách lập ETA](dropvla_resource_estimates_vi.md).
 - [A-MemGuard: phương pháp adaptation](amemguard_method.md).
-- [A-MemGuard: implementation review và giới hạn](amemguard_review.md).
+- [A-MemGuard: review implementation cũ](history/amemguard_review.md) — báo cáo lịch sử.
 
 Lệnh ví dụ chạy từ project root. Paths của run/snapshot là placeholders;
 artifacts dưới `output/` là dữ liệu local, không được commit.

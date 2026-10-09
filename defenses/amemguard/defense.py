@@ -27,7 +27,7 @@ from typing import Any, Sequence
 import torch
 import torch.nn.functional as F
 
-from .base_defense import BaseDefense
+from ..base_defense import BaseDefense
 
 
 @dataclass(frozen=True)

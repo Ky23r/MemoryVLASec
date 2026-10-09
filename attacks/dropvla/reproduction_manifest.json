@@ -133,18 +133,70 @@
   "relocation_changes": {
     "scripts/_common.sh": {
       "original": "ce8b8e67de9d76edead32c3b2f94ba8c5022bbfc47aa1cb53e1f52dc52663523",
-      "relocated": "01b77a12652196ddff7cd944921df9236c6caa22ba35260f8c0fc1727e90535b",
-      "reason": "runtime config path or source-seal inventory extended for relocation"
+      "relocated": "dab9cec24ee4cd05007d7e299bd224b82a3aa5dc5c3075587b5dd618d01ac58f",
+      "reason": "Remove unused old calibration helper and reject defense execution; attack launch arguments preserved."
     },
     "scripts/validate_dropvla_cpu.py": {
       "original": "df89dc28525ad32251d50b2c9dcf996214c19c4277c2ba1f0b6082af56786827",
-      "relocated": "5a766eeae168ba5066e6987f01de76ce896328196f52703ff9c061217e8e9048",
-      "reason": "runtime config path or source-seal inventory extended for relocation"
+      "relocated": "4ef906d8baca2b79e084a0d644a4641d2ef16c3febc3543d875b3f8136e638c5",
+      "reason": "Validate attack-only runtime instead of obsolete defense and exclude removed defense sources."
     },
     "scripts/wait_dropvla.sh": {
       "original": "43f2e734a5b5e5d07804b54a69a6876dc7e9691958da861636551ae45d0bf355",
       "relocated": "c6b93e8c46d50c10831af7ae31f2059c4dda64d0436e9ad9498a2e9cdcb3f10b",
       "reason": "runtime config path or source-seal inventory extended for relocation"
+    },
+    "models/secure_vla.py": {
+      "original": "5c62bcb21a363356e3979e502fe1d43198a61af2511a644b21e935e84c56f125",
+      "relocated": "3754bfbffbd7be0220fdde5dacbb2b3df03a9bc0ff155a1826e3ed79165af318",
+      "reason": "Remove unused legacy defense hooks and dependency; attack-only forward and checkpoint key hierarchy preserved."
+    },
+    "utils/args.py": {
+      "original": "ac6b1b82b19a16ef82d57ed8e21d42c14123bfec8d135fed9f77768784ab0a0c",
+      "relocated": "19b906e301b8e2e56b428e1a805d003a2e38b464a7dfdd22f48ea608e22cd517",
+      "reason": "Disable old defense arguments; attack arguments and defaults preserved."
+    },
+    "scripts/download_assets.py": {
+      "original": "55124d30fcca36ea6b54fe0938d7740e5590edbc9f0c81880bf44931acfc5d93",
+      "relocated": "ff2d10c49b2bd155a8876a72bdd7104c0155979387fb5d10c2916825e87128a3",
+      "reason": "Asset status no longer advertises deleted legacy calibration commands; asset download logic unchanged."
     }
+  },
+  "removed_sources": {
+    "defenses/__init__.py": {
+      "sha256": "2ef75079c60674bcbc509ee3e2c03510041177ce0878d6243a9cdc19e5ecb83a",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    },
+    "defenses/base_defense.py": {
+      "sha256": "7548e0ea9904eb089b8a6563dc80f2ca3ebaf72cc659cfdee7cbc9bd234aec11",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    },
+    "defenses/amemguard.py": {
+      "sha256": "59250424b089c1305e640727a551197b77ec7a04fba544735b6bdf979320afa3",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    },
+    "scripts/calibrate_amemguard.py": {
+      "sha256": "46a39242696c06f577c9ba5cb0469b250bb504bc96df135d83e90aec71b556c7",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    },
+    "scripts/eval_dropvla_amemguard.sh": {
+      "sha256": "89a5fd2b5d0b793fab0cc181135f3a47272d7f8ab46d40fd6fcf2d3e45b97b92",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    },
+    "scripts/eval_badvla_amemguard.sh": {
+      "sha256": "d392c81c350d34ad959a4290e81305fa404e0d35d69169e07ae64afaa3223598",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    },
+    "tests/test_amemguard.py": {
+      "sha256": "91c16d277e55289fe9fdc8c366b5b1be80387681fcadefe0603c0957688f9239",
+      "reason": "Unused legacy defense removed from active attack-only runtime; exact source retained in original backup and Git history."
+    }
+  },
+  "defense_separation": {
+    "active_runtime": "attack-only; defense none",
+    "current_defense": "defenses/amemguard/",
+    "completed_experiment_used_defense": false,
+    "historical_main": "_main_original.py kept byte-identical; obsolete defense branch is rejected by the active parser",
+    "archive": "dropvla_backup/experiment_source; repository commit ffe5734e"
   }
 }
